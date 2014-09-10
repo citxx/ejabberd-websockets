@@ -7,10 +7,12 @@
 *.o
 *.so
 *.pyc
+*.beam
 
 # Logs and databases #
 ######################
 *.log
+*.swp
 
 # OS generated files #
 ######################

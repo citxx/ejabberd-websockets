@@ -30,6 +30,7 @@
 	 process_request/5]).
 
 -include("ejabberd.hrl").
+-include("logger.hrl").
 
 %% Module constants
 -define(NULL_PEER, {{0, 0, 0, 0}, 0}).
@@ -116,53 +117,59 @@ peername({xmpp_websocket, _FsmRef, IP}) ->
 
 %% entry point for websocket data
 process_request(WSockMod, WSock, FsmRef, Data, IP) ->
-    Opts1 = ejabberd_c2s_config:get_c2s_limits(),
-    Opts = [{xml_socket, true} | Opts1],
-    MaxStanzaSize =
+	?DEBUG("XMPP_WEBSOCKET_PROCESS_REQUEST: ~p", [Data]),
+	Opts1 = ejabberd_c2s_config:get_c2s_limits(),
+	Opts = [{xml_socket, true} | Opts1],
+	MaxStanzaSize =
 	case lists:keysearch(max_stanza_size, 1, Opts) of
-	    {value, {_, Size}} -> Size;
-	    _ -> infinity
+		{value, {_, Size}} -> Size;
+		_ -> infinity
 	end,
-    PayloadSize = iolist_size(Data),
-    case validate_request(Data, PayloadSize, MaxStanzaSize) of
-        {ok, ParsedPayload} ->
-            case stream_start(ParsedPayload) of
-                {Host, Sid, Key} when (FsmRef =:= false) or
-                                      (FsmRef =:= undefined) ->
-                    case start(Host, Sid, Key, IP) of
-                        {ok, Pid} ->
-                            ?DEBUG("Session Pid:~p~n",[Pid]),
-                            gen_fsm:sync_send_all_state_event(
-                              Pid,
-                              #wsr{sockmod=WSockMod,
-                                   socket=WSock,
-                                   out=[ParsedPayload]}),
-                            {<<"session started">>, <<>>, Pid};
-                        S ->
-                            ?ERROR_MSG("Error starting session:~p~n", [S])
-                    end;
-                {_Host, _Sid, _Key} when (FsmRef =/= false) or
-                                         (FsmRef =/= undefined) ->
-                    ?DEBUG("Stream restart after c2s started. ~p~n",
-                           [FsmRef]),
-                    send_data(FsmRef, #wsr{sockmod=WSockMod,
-                                           socket=WSock,
-                                           out=[ParsedPayload]}),
-                    {Data, <<>>, FsmRef};
-                false ->
-                    send_data(FsmRef, #wsr{sockmod=WSockMod,
-                                           socket=WSock,
-                                           out=[ParsedPayload]}),
-                    {Data, <<>>, FsmRef};
-                _ ->
-                    ?ERROR_MSG("Stream Start with no FSM reference: ~p~n",
-                               [FsmRef]),
-                    {Data, <<>>, FsmRef}
-            end;
-        _ ->
-            ?DEBUG("Bad Request: ~p~n", [Data]),
-            {<<"bad request">>, <<>>, FsmRef}
-    end.
+	PayloadSize = iolist_size(Data),
+	?DEBUG("Before validation", []),
+	case validate_request(Data, PayloadSize, MaxStanzaSize) of
+		{ok, ParsedPayload} ->
+			?DEBUG("Validated", []),
+			case stream_start(ParsedPayload) of
+				{Host, Sid, Key} when (FsmRef =:= false) or
+				(FsmRef =:= undefined) ->
+					?DEBUG("Stream start 1", []),
+					case start(Host, Sid, Key, IP) of
+						{ok, Pid} ->
+							?DEBUG("Session Pid:~p~n",[Pid]),
+							gen_fsm:sync_send_all_state_event(
+								Pid,
+								#wsr{sockmod=WSockMod,
+									socket=WSock,
+									out=[ParsedPayload]}),
+							{<<"session started">>, <<>>, Pid};
+						S ->
+							?ERROR_MSG("Error starting session:~p~n", [S])
+					end;
+				{_Host, _Sid, _Key} when (FsmRef =/= false) or
+				(FsmRef =/= undefined) ->
+					?DEBUG("Stream start 2", []),
+					?DEBUG("Stream restart after c2s started. ~p~n",
+						[FsmRef]),
+					send_data(FsmRef, #wsr{sockmod=WSockMod,
+							socket=WSock,
+							out=[ParsedPayload]}),
+					{Data, <<>>, FsmRef};
+				false ->
+					?DEBUG("Stream start 3", []),
+					send_data(FsmRef, #wsr{sockmod=WSockMod,
+							socket=WSock,
+							out=[ParsedPayload]}),
+					{Data, <<>>, FsmRef};
+				_ ->
+					?ERROR_MSG("Stream Start with no FSM reference: ~p~n",
+						[FsmRef]),
+					{Data, <<>>, FsmRef}
+			end;
+		_ ->
+			?DEBUG("Bad Request: ~p~n", [Data]),
+			{<<"bad request">>, <<>>, FsmRef}
+	end.
 
 %%%----------------------------------------------------------------------
 %%% Callback functions from gen_fsm
@@ -385,17 +392,21 @@ validate_request(Data, PayloadSize, MaxStanzaSize) ->
     ?DEBUG("--- incoming data --- ~n~s~n --- END --- ", [Data]),
     case xml_stream:parse_element(Data) of
         {error, Reason} ->
+					?DEBUG("Parse error: ~p", [Reason]),
             %% detect stream start and stream end
             case stream_start_end(Data) of
                 {xmlstreamstart, Name, Attrs} ->
+									?DEBUG("Stream start: ~p", [Name]),
                     {ok, {xmlstreamstart, Name, Attrs}};
                 {xmlstreamend, End} ->
+									?DEBUG("Stream end: ~p", [End]),
                     {ok, {xmlstreamend, End}};
                 _ ->
                     ?ERROR_MSG("Bad xml data: ~p~n", [Reason]),
                     {error, bad_request}
             end;
         ParsedData ->
+					?DEBUG("Parsed", []),
             if PayloadSize =< MaxStanzaSize ->
                     {ok, ParsedData};
                true ->
@@ -479,22 +490,23 @@ set_inactivity_timer(Pause, _MaxInactivity) when Pause > 0 ->
 set_inactivity_timer(_Pause, MaxInactivity) ->
     erlang:start_timer(MaxInactivity, self(), []).
 
-stream_start_end(Data) ->
+stream_start_end(Data) when is_binary(Data) ->
     %% find <stream:stream>
     case re:run(Data, "\<stream\:stream.+\>", []) of
         {match, _X} ->
+					?DEBUG("Stream matched", []),
             %% find to and version
             To = case re:run(Data,
                              "to=[\"']?((?:.(?![\"\']?\\s+(?:\\S+)=|[>\"\']))+.)[\"\']?", [{capture,[1]}]) of
-                     {match, [{Start, Finish}]} ->
-                         lists:sublist(Data, Start+1, Finish);
+                     {match, [{Start, Length}]} ->
+												binary:part(Data, Start, Length);
                      _ ->
                          undefined
                  end,
             Version = case re:run(Data,
                             "version=[\"']?((?:.(?![\"\']?\\s+(?:\\S+)=|[>\"\']))+.)[\"\']?", [{capture,[1]}]) of
-                          {match, [{St, Fin}]} ->
-                              lists:sublist(Data, St+1, Fin);
+                          {match, [{St, Len}]} ->
+														binary:part(Data, St, Len);
                           T ->
                               T
                       end,
@@ -503,6 +515,7 @@ stream_start_end(Data) ->
                                                {"xmlns", ?NS_CLIENT},
                                                {"xmlns:stream", ?NS_STREAM}]};
         nomatch ->
+					?DEBUG("Stream not matched", []),
             %% find </stream:stream>
             case re:run(Data, "^</stream:stream>", [global]) of
                 {match, _Loc} ->
