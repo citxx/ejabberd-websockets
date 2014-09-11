@@ -1,26 +1,47 @@
-%%%----------------------------------------------------------------------
-%%% File    : ejabberd_websocket.erl
-%%% Author  : Nathan Zorn <nathan.zorn@gmail.com>
-%%% Purpose : Listener for XMPP over websockets
-%%%----------------------------------------------------------------------
+%%%-----------------------------------------------------------------------------
+%%% File    : websocket_session.erl
+%%% Author  : Artem Tabolin <artemtab@yandex.ru>
+%%%           Based on Nathan Zorn's ejabberd_websocket module
+%%% Purpose : Implementation of WebSockets protocol
+%%%           Listener for XMPP over websockets protocol
+%%%-----------------------------------------------------------------------------
 
--module(ejabberd_websocket).
--author('nathan.zorn@gmail.com').
+-module(websocket_session).
+-author('artemtab@yandex.ru').
 
-%% External Exports
--export([start/2,
-		start_link/2,
+-behaviour(gen_fsm).
+
+%% API
+-export([
+		start_link/2
+	]).
+
+%% Listener callbacks
+-export([
 		become_controller/1,
 		socket_type/0,
-		receive_headers/1,
-		transform_listen_option/2]).
-%% Callbacks
--export([init/2]).
-%% Includes
+		start/2,
+		transform_listen_option/2
+	]).
+
+%% gen_fsm callbacks
+-export([
+		handle_info/3,
+		init/1,
+		terminate/3
+	]).
+
+-export([
+		ws_handshake_request/2,
+		ws_handshake_header/2,
+		ws_session/2
+	]).
+
 -include("ejabberd.hrl").
 -include("logger.hrl").
 -include("jlib.hrl").
--include("ejabberd_websocket.hrl").
+-include("websocket_session.hrl").
+
 %% record used to keep track of listener state
 -record(state, {sockmod,
 		socket,
@@ -41,51 +62,241 @@
 		websocket_pid,
 		trail = ""
 	}).
--define(MAXKEY_LENGTH, 4294967295).
-%% Supervisor Start
-start(SockData, Opts) ->
-	supervisor:start_child(ejabberd_websocket_sup, [SockData, Opts]).
+
+-type request_handler() :: {list(binary()), atom()}.
+
+-record(ws_state, {
+		sockmod :: atom(),
+		socket :: inet:socket(),
+		request_handlers = [] :: list(request_handler()),
+		request_method = undefined :: undefined | atom() | binary(),
+		request_version = undefined :: undefined | {integer(), integer()},
+		request_path = undefined :: undefined | {abs_path, binary()} | binary(),
+		request_headers = #{} :: map()
+	}).
+
+%-------------------------------------------------------------------------------
+% API
+%-------------------------------------------------------------------------------
 
 start_link(SockData, Opts) ->
-	{ok, proc_lib:spawn_link(ejabberd_websocket, init, [SockData, Opts])}.
+	gen_fsm:start_link(?MODULE, [SockData, Opts], []).
 
-init({SockMod, Socket}, Opts) ->
-	%?WARNING_MSG("ejabberd_websocket:init(~p, ~p)", [{SockMod, Socket}, Opts]),
+
+%-------------------------------------------------------------------------------
+% Listener callbacks
+%-------------------------------------------------------------------------------
+
+-spec start({atom(), inet:socket()}, [term()]) -> any(). 
+start(SockData, Opts) ->
+	supervisor:start_child(websocket_session_sup, [SockData, Opts]).
+
+become_controller(_Pid) ->
+	ok.
+
+socket_type() ->
+	raw.
+
+transform_listen_option({request_handlers, Hs}, Opts) ->
+	Hs1 = lists:map(
+		fun({Path, Mod}) ->
+				{to_normalized_path(Path), Mod}
+		end, Hs),
+	[{request_handlers, Hs1} | Opts];
+transform_listen_option(Opt, Opts) ->
+	[Opt|Opts].
+
+
+%-------------------------------------------------------------------------------
+% gen_fsm callbacks
+%-------------------------------------------------------------------------------
+
+init([{SockMod, Socket}, Opts]) ->
 	TLSEnabled = lists:member(tls, Opts),
-	TLSOpts1 = lists:filter(fun({certfile, _}) -> true;
-			(_) -> false
-		end, Opts),
+	TLSOpts1 = [Opt || {certfile, _} = Opt <- Opts],
 	TLSOpts = [verify_none | TLSOpts1],
-	{SockMod1, Socket1} =
-	if
-		TLSEnabled ->
+
+	{SockMod1, Socket1} = case TLSEnabled of
+		true ->
 			inet:setopts(Socket, [{recbuf, 8192}]),
 			{ok, TLSSocket} = tls:tcp_to_tls(Socket, TLSOpts),
 			{tls, TLSSocket};
-		true ->
+		false ->
 			{SockMod, Socket}
 	end,
+
 	case SockMod1 of
 		gen_tcp ->
 			inet:setopts(Socket1, [{packet, http}, {recbuf, 8192}]);
 		_ ->
-			ok
+			skip
 	end,
-	RequestHandlers =
-	case lists:keysearch(request_handlers, 1, Opts) of
+
+	inet:setopts(Socket1, [{active, once}]),
+
+	RequestHandlers = case lists:keysearch(request_handlers, 1, Opts) of
 		{value, {request_handlers, H}} -> H;
 		false -> []
 	end,
+
 	?INFO_MSG("started: ~p", [{SockMod1, Socket1}]),
-	State = #state{sockmod = SockMod1,
+	State = #ws_state{sockmod = SockMod1,
 		socket = Socket1,
 		request_handlers = RequestHandlers},
-	receive_headers(State).
+	{ok, ws_handshake_request, State}.
 
-become_controller(_Pid) ->
+terminate(Reason, StateName, State) ->
+	?DEBUG("~p:terminate(~p, ~p, map)", [?MODULE, Reason, StateName]),
 	ok.
-socket_type() ->
-	raw.
+
+% TODO: add tls support
+handle_info({_Type, Socket, Data}, StateName, State) ->
+	?DEBUG("Recieved raw data: ~p", [Data]),
+	SwitchToRaw = case Data of
+		http_eoh -> [{packet, raw}];
+		_ -> []
+	end,
+	inet:setopts(Socket, [{active, once} | SwitchToRaw]),
+	apply(?MODULE, StateName, [{recv, Data}, State]);
+
+% TODO: proper tcp_closed handling
+handle_info({tcp_closed, _Socket}, _StateName, State) ->
+	{stop, normal, State}.
+
+% TODO: add tcp_error handling
+
+ws_handshake_request(
+		{recv, {http_request, Method, Uri, Version}},
+		#ws_state{} = State) ->
+	Path = case Uri of
+		{absoluteURI, _Scheme, _Host, _Port, P} -> {abs_path, P};
+		_ -> Uri
+	end,
+	{next_state, ws_handshake_header, State#ws_state{
+			request_version = Version,
+			request_method = Method,
+			request_path = Path
+		}};
+
+% TODO: properly handle
+ws_handshake_request(Event, State) ->
+	?WARNING_MSG(
+		"Unexpected event received in state ws_handshake_request:~n"
+		"  Event = ~p~n"
+		"  State = ~p~n",
+		[Event, State]),
+	{stop, normal, State}.
+	
+% TODO: implement
+ws_handshake_header({recv, {http_header, _, Name, _, Value}}, #ws_state{
+		request_headers = Headers
+	} = State) ->
+	{next_state, ws_handshake_header, State#ws_state{
+			request_headers = add_header(Name, Value, Headers)
+		}};
+
+ws_handshake_header({recv, http_eoh}, #ws_state{
+		sockmod = SockMod,
+		socket = Socket,
+		request_handlers = RequestHandlers,
+		request_method = Method,
+		request_version = {VMaj, VMin} = Version,
+		request_path = {abs_path, Path},
+		request_headers = Headers
+	} = State) ->
+	Host = maps:get(<<"host">>, Headers, []),
+	Upgrade = [jlib:tolower(X) || X <- maps:get(<<"upgrade">>, Headers, [])],
+	Connection = [jlib:tolower(X) || X <- maps:get(<<"connection">>, Headers, [])],
+	SecWebSocketKey = maps:get(<<"sec-websocket-key">>, Headers, []),
+	?DEBUG("SecWebSocketKey = ~p of ~p", [SecWebSocketKey, 1]),
+	SecWebSocketVersion = maps:get(<<"sec-websocket-version">>, Headers, []),
+	
+	UpgradeContainsWebsocket = lists:member(<<"websocket">>, Upgrade),
+	ConnectionContainsUpgrade = lists:member(<<"upgrade">>, Connection),
+	MatchedRequestHandler = case (catch url_decode_q_split(Path)) of 
+		{'EXIT', _} -> undefined;
+		{NPath, _Query} -> 
+			LPath = [path_decode(NPE) || NPE <- string:tokens(NPath, "/")],
+			find_request_handler(RequestHandlers, to_normalized_path(LPath))
+	end,
+
+	{Status, Response} = if
+		Method =/= 'GET' ->
+			{failure, build_http_response(
+					Version, 400, "Bad request: invalid method", [])};
+		(VMaj < 1) or (VMaj =:= 1) and (VMin < 1) ->
+			{failure, build_http_response(
+					Version, 400, "Bad request: need HTTP/1.1 or higher", [])};
+		length(Host) =/= 1 ->
+			{failure, build_http_response(
+					Version, 400, "Bad request: need exactly one 'Host' header", [])};
+		not UpgradeContainsWebsocket ->
+			{failure, build_http_response(
+					Version, 400, "Bad request: 'Upgrade' header doesn't include 'websocket'", [])};
+		not ConnectionContainsUpgrade ->
+			{failure, build_http_response(
+					Version, 400, "Bad request: 'Connection' header doesn't include 'upgrade'", [])};
+		length(SecWebSocketKey) =/= 1 ->
+			{failure, build_http_response(
+					Version, 400, "Bad request: need exactly one 'Sec-WebSocket-Key' header", [])};
+		length(SecWebSocketVersion) =/= 1 ->
+			{failure, build_http_response(
+					Version, 400, "Bad request: need exactly one 'Sec-WebSocket-Version' header", [])};
+		SecWebSocketVersion =/= [<<"13">>] -> 
+			{failure, build_http_response(
+					Version, 400, "Bad request: unsupported version of WebSocket protocol", [])};
+		MatchedRequestHandler =:= undefined ->
+			{failure, build_http_response(
+					Version, 404, "Not found", [])};
+
+		true ->
+			?DEBUG("Switching to WebSocket protocol", []),
+			[Key] = SecWebSocketKey,
+			ResponseKey = websocket_transform_key(Key),
+			{success, build_http_response(
+					Version, 101, "Switching protocol to XMPP over WebSocket", [
+						{<<"Upgrade">>, <<"websocket">>},
+						{<<"Connection">>, <<"Upgrade">>},
+						{<<"Sec-WebSocket-Accept">>, ResponseKey}])}
+	end,
+	
+	SockMod:send(Socket, Response),
+
+	{next_state, ws_session, State}.
+
+ws_session({recv, Data}, State) ->
+	{next_state, ws_session, State}.
+
+%-------------------------------------------------------------------------------
+% Internal functions
+%-------------------------------------------------------------------------------
+
+-spec add_header(atom() | iodata(), iodata(), map()) -> map().
+add_header(Name, Value, HeadersMap) ->
+	BName = jlib:tolower(something_to_binary(Name)),
+	Old = maps:get(BName, HeadersMap, []),
+	New = re:split(Value, ", ", [{return, binary}]) ++ Old,
+	maps:put(BName, New ++ Old, HeadersMap).
+
+-spec something_to_binary(atom | iodata()) -> binary().
+something_to_binary(Something) ->
+	case Something of
+		X when is_atom(X) -> atom_to_binary(X, latin1);
+		X when is_binary(X) or is_list(X) -> iolist_to_binary(X)
+	end.
+
+-spec build_http_response(
+	{integer(), integer()}, integer(), iodata(), [{iodata(), iodata()}]) -> binary().
+build_http_response({VMaj, VMin}, Code, Message, Headers) ->
+	VMajBin = integer_to_binary(VMaj),
+	VMinBin = integer_to_binary(VMin),
+	CodeBin = integer_to_binary(Code),
+	Response = iolist_to_binary([
+		"HTTP/", VMajBin, ".", VMinBin, " ", CodeBin, " ", Message, "\r\n",
+		[[Name, ": ", Value, "\r\n"] || {Name, Value} <- Headers],
+		"\r\n"]),
+	?DEBUG("Sending response:~n~s", [Response]),
+	Response.
 
 -spec to_normalized_path(iolist()) -> binary().
 to_normalized_path(PList) when is_list(PList) ->
@@ -98,15 +309,6 @@ to_normalized_path(PList) when is_list(PList) ->
 to_normalized_path(PBin) when is_binary(PBin) ->
 	RawPath = binary:split(PBin, <<$/>>, [global]),
 	[P || P <- RawPath, byte_size(P) > 0].
-
-transform_listen_option({request_handlers, Hs}, Opts) ->
-	Hs1 = lists:map(
-		fun({Path, Mod}) ->
-			{to_normalized_path(Path), Mod}
-		end, Hs),
-	[{request_handlers, Hs1} | Opts];
-transform_listen_option(Opt, Opts) ->
-	[Opt|Opts].
 
 recv(SockMod, Socket, Length, Timeout) ->
 	Result = SockMod:recv(Socket, Length, Timeout),
@@ -286,9 +488,6 @@ process_header(State, Data) ->
 				request_handlers = State#state.request_handlers}
 	end.
 
-add_header(Name, Value, State) ->
-	[{Name, Value} | State#state.request_headers].
-
 is_websocket_upgrade(RequestHeaders) ->
 	?WARNING_MSG("ejabberd_websocket:is_websocket_upgrade(~p)", [RequestHeaders]),
 	Connection = case lists:keyfind('Connection', 1, RequestHeaders) of
@@ -440,13 +639,14 @@ build_handshake_response(ResponseKey, SubProtocol) ->
 		undefined -> "";
 		P -> ["Sec-WebSocket-Protocol: ", P, "\r\n"]
 	end,
-	Response = ["HTTP/1.1 101 Switching protocol to XMPP over WebSocket\r\n",
+	Response = iolist_to_binary([
+		"HTTP/1.1 101 Switching protocol to XMPP over WebSocket\r\n",
 		"Upgrade: websocket\r\n",
 		"Connection: Upgrade\r\n",
 		"Sec-WebSocket-Accept: ", ResponseKey, "\r\n",
 		SubProtocolHeader,
-		"\r\n"],
-	?DEBUG("WebSocket: response to handshake with:~n~n~s~n~n", [iolist_to_binary(Response)]),
+		"\r\n"]),
+	?DEBUG("WebSocket: response to handshake with:~n~n~s~n~n", [Response]),
 	Response.
 
 sub_protocol(Headers) ->

@@ -466,7 +466,7 @@ send_data(FsmRef, Req) ->
         false ->
             ?DEBUG("No session started.",[]);
         _ ->
-            ?DEBUG("Writing data!.",[]),
+            ?DEBUG("Writing data!. ~p",[Req]),
             %% write data to c2s
             gen_fsm:sync_send_all_state_event(FsmRef, Req)
     end.

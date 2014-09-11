@@ -22,7 +22,7 @@
 -include("ejabberd.hrl").
 -include("logger.hrl").
 -include("jlib.hrl").
--include("ejabberd_websocket.hrl").
+-include("websocket_session.hrl").
 
 -record(ws_data_state, {
 	step = read_header ::
@@ -43,7 +43,7 @@
 %%%----------------------------------------------------------------------
 %%% API
 %%%----------------------------------------------------------------------
-process(Path, Req) ->
+process(_Path, Req) ->
 	%% Validate Origin
 	case validate_origin(Req#wsrequest.headers) of
 		true ->
@@ -215,9 +215,9 @@ process_data(#ws_data_state{
 		mask = Mask,
 		masking_key = MaskingKey,
 		payload_length = Length,
-		buffer = Buffer,
+		buffer = _Buffer,
 		data = Data
-	} = State) when byte_size(Data) >= Length ->
+	} = _State) when byte_size(Data) >= Length ->
 	<<MaskedPayloadData:Length/binary, Rest/binary>> = Data,
 
 	PayloadData = mask(MaskedPayloadData, MaskingKey),
