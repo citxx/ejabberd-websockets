@@ -3,11 +3,11 @@
 %%% Author  : Nathan Zorn (nathan.zorn@gmail.com)
 %%% Purpose : Implements XMPP over WebSockets
 %%%----------------------------------------------------------------------
--module(ejabberd_xmpp_websocket).
+-module(websocket_xmpp).
 
 -behaviour(gen_fsm).
 
--export([start_link/3,
+-export([start_link/4,
 	 init/1,
 	 handle_event/3,
 	 handle_sync_event/4,
@@ -26,8 +26,8 @@
 	 change_shaper/2,
 	 monitor/1,
 	 close/1,
-	 start/4,
-	 process_request/5]).
+	 start/5,
+	 process_request/6]).
 
 -include("ejabberd.hrl").
 -include("logger.hrl").
@@ -52,27 +52,28 @@
 		waiting_input = false,
 		shaper_state,
 		shaper_timer,
-                websocket_sockmod,
-                websocket_s,
+		websocket_sockmod,
+		websocket_s,
 		websocket_receiver,
+		ws_session_ref,
 		wait_timer,
 		timer,
 		pause=0,
 		max_inactivity,
 		max_pause,
 		ip = ?NULL_PEER
-	       }).
+	}).
 
-start(Host, Sid, Key, IP) ->
+start(Host, Sid, Key, IP, WsSessionRef) ->
     Proc = gen_mod:get_module_proc(Host, ejabberd_mod_websocket),
-    case catch supervisor:start_child(Proc, [Sid, Key, IP]) of
+    case catch supervisor:start_child(Proc, [Sid, Key, IP, WsSessionRef]) of
     	{ok, Pid} -> {ok, Pid};
 	Reason ->
             ?ERROR_MSG("~p~n",[Reason]),
             {error, "Cannot start XMPP, Websocket session"}
     end.
-start_link(Sid, Key, IP) ->
-    gen_fsm:start_link(?MODULE, [Sid, Key, IP], []).
+start_link(Sid, Key, IP, WsSessionRef) ->
+    gen_fsm:start_link(?MODULE, [Sid, Key, IP, WsSessionRef], []).
 
 send({xmpp_websocket, FsmRef, _IP}, Packet) ->
     gen_fsm:sync_send_all_state_event(FsmRef, {send, Packet}).
@@ -116,7 +117,7 @@ peername({xmpp_websocket, _FsmRef, IP}) ->
     {ok, IP}.
 
 %% entry point for websocket data
-process_request(WSockMod, WSock, FsmRef, Data, IP) ->
+process_request(WSockMod, WSock, FsmRef, Data, IP, WsSessionRef) ->
 	?DEBUG("XMPP_WEBSOCKET_PROCESS_REQUEST: ~p", [Data]),
 	Opts1 = ejabberd_c2s_config:get_c2s_limits(),
 	Opts = [{xml_socket, true} | Opts1],
@@ -134,7 +135,7 @@ process_request(WSockMod, WSock, FsmRef, Data, IP) ->
 				{Host, Sid, Key} when (FsmRef =:= false) or
 				(FsmRef =:= undefined) ->
 					?DEBUG("Stream start 1", []),
-					case start(Host, Sid, Key, IP) of
+					case start(Host, Sid, Key, IP, WsSessionRef) of
 						{ok, Pid} ->
 							?DEBUG("Session Pid:~p~n",[Pid]),
 							gen_fsm:sync_send_all_state_event(
@@ -182,23 +183,24 @@ process_request(WSockMod, WSock, FsmRef, Data, IP) ->
 %%          ignore                              |
 %%          {stop, StopReason}
 %%----------------------------------------------------------------------
-init([Sid, Key, IP]) ->
-    ?DEBUG("started: ~p", [{Sid, Key, IP}]),
-    Opts1 = ejabberd_c2s_config:get_c2s_limits(),
-    Opts = [{xml_socket, true} | Opts1],
+init([Sid, Key, IP, WsSessionRef]) ->
+	?DEBUG("started: ~p", [{Sid, Key, IP}]),
+	Opts1 = ejabberd_c2s_config:get_c2s_limits(),
+	Opts = [{xml_socket, true} | Opts1],
 
-    Shaper = none,
-    ShaperState = shaper:new(Shaper),
-    Socket = {xmpp_websocket, self(), IP},
-    ejabberd_socket:start(ejabberd_c2s, ?MODULE, Socket, Opts),
-    Timer = erlang:start_timer(?MAX_INACTIVITY, self(), []),
-    {ok, loop, #state{id = Sid,
-		      key = Key,
-		      socket = Socket,
-		      shaper_state = ShaperState,
-		      max_inactivity = ?MAX_INACTIVITY,
-		      max_pause = ?MAX_PAUSE,
-		      timer = Timer}}.
+	Shaper = none,
+	ShaperState = shaper:new(Shaper),
+	Socket = {xmpp_websocket, self(), IP},
+	ejabberd_socket:start(ejabberd_c2s, ?MODULE, Socket, Opts),
+	Timer = erlang:start_timer(?MAX_INACTIVITY, self(), []),
+	{ok, loop, #state{id = Sid,
+			key = Key,
+			socket = Socket,
+			ws_session_ref = WsSessionRef,
+			shaper_state = ShaperState,
+			max_inactivity = ?MAX_INACTIVITY,
+			max_pause = ?MAX_PAUSE,
+			timer = Timer}}.
 
 %%----------------------------------------------------------------------
 %% Func: handle_event/3
@@ -242,81 +244,81 @@ handle_event(_Event, StateName, StateData) ->
 %%          {stop, Reason, Reply, NewStateData}
 %%----------------------------------------------------------------------
 handle_sync_event({send_xml, Packet}, _From, StateName,
-		  #state{websocket_s = undefined} = StateData) ->
-    Output = [Packet | StateData#state.output],
-    Reply = ok,
-    {reply, Reply, StateName, StateData#state{output = Output}};
+		#state{websocket_s = undefined} = StateData) ->
+	Output = [Packet | StateData#state.output],
+	Reply = ok,
+	{reply, Reply, StateName, StateData#state{output = Output}};
 handle_sync_event({send_xml, Packet}, _From, StateName, StateData) ->
-    Output = [Packet | StateData#state.output],
-    ?DEBUG("Data from C2S(timer):~p:~p~n",[Output,StateData]),
-    cancel_timer(StateData#state.timer),
-    Timer = set_inactivity_timer(StateData#state.pause,
-				 StateData#state.max_inactivity),
-    lists:foreach(fun ({xmlstreamstart, Name, Attrs}) ->
-                          send_element(StateData,
-                                       {xmlstreamstart, Name, Attrs});
-                      ({xmlstreamend, End}) ->
-                          send_element(StateData,
-                                       {xmlstreamend, End});
-                      ({_Name, Element}) ->
-                          send_element(StateData, Element)
-                  end, Output),
-    cancel_timer(StateData#state.wait_timer),
-    Reply = ok,
-    {reply, Reply, StateName,
-     StateData#state{output = [],
-		     websocket_receiver = undefined,
-		     wait_timer = undefined,
-		     timer = Timer}};
+	Output = [Packet | StateData#state.output],
+	?DEBUG("Data from C2S(timer):~p:~p~n",[Output,StateData]),
+	cancel_timer(StateData#state.timer),
+	Timer = set_inactivity_timer(StateData#state.pause,
+		StateData#state.max_inactivity),
+	lists:foreach(fun ({xmlstreamstart, Name, Attrs}) ->
+				send_element(StateData,
+					{xmlstreamstart, Name, Attrs});
+			({xmlstreamend, End}) ->
+				send_element(StateData,
+					{xmlstreamend, End});
+			({_Name, Element}) ->
+				send_element(StateData, Element)
+		end, Output),
+	cancel_timer(StateData#state.wait_timer),
+	Reply = ok,
+	{reply, Reply, StateName,
+		StateData#state{output = [],
+			websocket_receiver = undefined,
+			wait_timer = undefined,
+			timer = Timer}};
 %% Handle writing to c2s
 handle_sync_event(#wsr{out=Payload, socket=WSocket, sockmod=WSockmod},
-                  From, StateName, StateData) ->
-    Reply = ok,
-    case StateData#state.waiting_input of
-        false ->
-            ?DEBUG("No c2spid.",[]),
-            {reply, Reply, StateName, StateData};
-        C2SPid ->
-            ?DEBUG("really sending now: ~p", [Payload]),
-            lists:foreach(
-              fun({xmlstreamend, End}) ->
-                      gen_fsm:send_event(
-                        C2SPid, {xmlstreamend, End});
-                 ({xmlelement, "stream:stream", Attrs, []}) ->
-                      send_stream_start(C2SPid, Attrs);
-                 ({xmlstreamstart, "stream:stream", Attrs}) ->
-                      send_stream_start(C2SPid, Attrs);
-                 (El) ->
-                      gen_fsm:send_event(
-                        C2SPid, {xmlstreamelement, El})
-              end, Payload),
-            {reply, Reply, StateName,
-             StateData#state{websocket_s=WSocket,
-                             websocket_sockmod=WSockmod,
-                             websocket_receiver=From}}
-    end;
+	From, StateName, StateData) ->
+	Reply = ok,
+	case StateData#state.waiting_input of
+		false ->
+			?DEBUG("No c2spid.",[]),
+			{reply, Reply, StateName, StateData};
+		C2SPid ->
+			?DEBUG("really sending now: ~p", [Payload]),
+			lists:foreach(
+				fun({xmlstreamend, End}) ->
+						gen_fsm:send_event(
+							C2SPid, {xmlstreamend, End});
+					({xmlelement, "stream:stream", Attrs, []}) ->
+						send_stream_start(C2SPid, Attrs);
+					({xmlstreamstart, "stream:stream", Attrs}) ->
+						send_stream_start(C2SPid, Attrs);
+					(El) ->
+						gen_fsm:send_event(
+							C2SPid, {xmlstreamelement, El})
+				end, Payload),
+			{reply, Reply, StateName,
+				StateData#state{websocket_s=WSocket,
+					websocket_sockmod=WSockmod,
+					websocket_receiver=From}}
+	end;
 handle_sync_event({stop,close}, _From, _StateName, StateData) ->
-    Reply = ok,
-    {stop, normal, Reply, StateData};
+	Reply = ok,
+	{stop, normal, Reply, StateData};
 handle_sync_event({stop,stream_closed}, _From, _StateName, StateData) ->
-    Reply = ok,
-    {stop, normal, Reply, StateData};
+	Reply = ok,
+	{stop, normal, Reply, StateData};
 handle_sync_event({stop, Reason}, _From, _StateName, StateData) ->
-    ?DEBUG("Closing websocket session ~p - Reason: ~p",
-           [StateData#state.id, Reason]),
-    Reply = ok,
-    {stop, normal, Reply, StateData};
+	?DEBUG("Closing websocket session ~p - Reason: ~p",
+		[StateData#state.id, Reason]),
+	Reply = ok,
+	{stop, normal, Reply, StateData};
 
 handle_sync_event(peername, _From, StateName, StateData) ->
-    Reply = {ok, StateData#state.ip},
-    {reply, Reply, StateName, StateData};
+	Reply = {ok, StateData#state.ip},
+	{reply, Reply, StateName, StateData};
 
 handle_sync_event(_Event, _From, StateName, StateData) ->
-    Reply = ok,
-    {reply, Reply, StateName, StateData}.
+	Reply = ok,
+	{reply, Reply, StateName, StateData}.
 
 code_change(_OldVsn, StateName, StateData, _Extra) ->
-    {ok, StateName, StateData}.
+	{ok, StateName, StateData}.
 
 %%----------------------------------------------------------------------
 %% Func: handle_info/3
@@ -389,30 +391,31 @@ stream_start(ParsedPayload) ->
     end.
 %% validate request sent. ensure that its parsable XMPP
 validate_request(Data, PayloadSize, MaxStanzaSize) ->
-    ?DEBUG("--- incoming data --- ~n~s~n --- END --- ", [Data]),
-    case xml_stream:parse_element(Data) of
-        {error, Reason} ->
-					?DEBUG("Parse error: ~p", [Reason]),
-            %% detect stream start and stream end
-            case stream_start_end(Data) of
-                {xmlstreamstart, Name, Attrs} ->
-									?DEBUG("Stream start: ~p", [Name]),
-                    {ok, {xmlstreamstart, Name, Attrs}};
-                {xmlstreamend, End} ->
-									?DEBUG("Stream end: ~p", [End]),
-                    {ok, {xmlstreamend, End}};
-                _ ->
-                    ?ERROR_MSG("Bad xml data: ~p~n", [Reason]),
-                    {error, bad_request}
-            end;
-        ParsedData ->
-					?DEBUG("Parsed", []),
-            if PayloadSize =< MaxStanzaSize ->
-                    {ok, ParsedData};
-               true ->
-                    {size_limit, {}}
-            end
-    end.
+	?DEBUG("--- incoming data --- ~n~s~n --- END --- ", [Data]),
+	case xml_stream:parse_element(Data) of
+		{error, Reason} ->
+			?DEBUG("Parse error: ~p", [Reason]),
+			%% detect stream start and stream end
+			case stream_start_end(Data) of
+				{xmlstreamstart, Name, Attrs} ->
+					?DEBUG("Stream start: ~p", [Name]),
+					{ok, {xmlstreamstart, Name, Attrs}};
+				{xmlstreamend, End} ->
+					?DEBUG("Stream end: ~p", [End]),
+					{ok, {xmlstreamend, End}};
+				_ ->
+					?ERROR_MSG("Bad xml data: ~p~n", [Reason]),
+					{error, bad_request}
+			end;
+		ParsedData ->
+			?DEBUG("Parsed", []),
+			if PayloadSize =< MaxStanzaSize ->
+					{ok, ParsedData};
+				true ->
+					{size_limit, {}}
+			end
+	end.
+
 send_receiver_reply(undefined, _Reply) ->
     ok;
 send_receiver_reply(Receiver, Reply) ->
@@ -420,9 +423,10 @@ send_receiver_reply(Receiver, Reply) ->
 
 %% send data to socket
 send_text(StateData, Text) ->
-    ?DEBUG("Send XML on stream = ~p", [Text]),
-    (StateData#state.websocket_sockmod):send(StateData#state.websocket_s,
-                                             [0, Text, 255]).
+	?DEBUG("Send XML on stream = ~p", [Text]),
+	websocket_session:send(StateData#state.ws_session_ref, Text).
+%    (StateData#state.websocket_sockmod):send(StateData#state.websocket_s,
+%[0, Text, 255]).
 
 send_element(StateData, {xmlstreamstart, Name, Attrs}) ->
     XmlString = streamstart_tobinary({xmlstreamstart, Name, Attrs}),

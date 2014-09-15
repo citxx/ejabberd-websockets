@@ -13,7 +13,8 @@
 
 %% API
 -export([
-		start_link/2
+		start_link/2,
+		send/2
 	]).
 
 %% Listener callbacks
@@ -63,8 +64,10 @@
 		trail = ""
 	}).
 
+-type process_reference() :: atom() | {atom(), atom()} | {global, term()} | pid().
 -type request_handler() :: {list(binary()), atom()}.
 
+%% record used to keep WebSocket session state
 -record(ws_state, {
 		sockmod :: atom(),
 		socket :: inet:socket(),
@@ -72,7 +75,10 @@
 		request_method = undefined :: undefined | atom() | binary(),
 		request_version = undefined :: undefined | {integer(), integer()},
 		request_path = undefined :: undefined | {abs_path, binary()} | binary(),
-		request_headers = #{} :: map()
+		request_headers = #{} :: map(),
+		parsing_state = websocket_frame:new_parsing_state() ::
+			websocket_frame:parsing_state(),
+		xmpp_ref = undefined
 	}).
 
 %-------------------------------------------------------------------------------
@@ -81,6 +87,11 @@
 
 start_link(SockData, Opts) ->
 	gen_fsm:start_link(?MODULE, [SockData, Opts], []).
+
+
+-spec send(process_reference(), iodata()) -> ok.
+send(WsSessionRef, Message) ->
+	gen_fsm:send_event(WsSessionRef, {send, Message}).
 
 
 %-------------------------------------------------------------------------------
@@ -168,9 +179,16 @@ handle_info({tcp_closed, _Socket}, _StateName, State) ->
 ws_handshake_request(
 		{recv, {http_request, Method, Uri, Version}},
 		#ws_state{} = State) ->
-	Path = case Uri of
+	% TODO: error handling
+	{abs_path, RawPath} = case Uri of
 		{absoluteURI, _Scheme, _Host, _Port, P} -> {abs_path, P};
 		_ -> Uri
+	end,
+	Path = case (catch url_decode_q_split(RawPath)) of 
+		{'EXIT', _} -> undefined;
+		{NPath, _Query} -> 
+			LPath = [path_decode(NPE) || NPE <- string:tokens(NPath, "/")],
+			to_normalized_path(LPath)
 	end,
 	{next_state, ws_handshake_header, State#ws_state{
 			request_version = Version,
@@ -187,7 +205,6 @@ ws_handshake_request(Event, State) ->
 		[Event, State]),
 	{stop, normal, State}.
 	
-% TODO: implement
 ws_handshake_header({recv, {http_header, _, Name, _, Value}}, #ws_state{
 		request_headers = Headers
 	} = State) ->
@@ -201,7 +218,7 @@ ws_handshake_header({recv, http_eoh}, #ws_state{
 		request_handlers = RequestHandlers,
 		request_method = Method,
 		request_version = {VMaj, VMin} = Version,
-		request_path = {abs_path, Path},
+		request_path = Path,
 		request_headers = Headers
 	} = State) ->
 	Host = maps:get(<<"host">>, Headers, []),
@@ -213,11 +230,9 @@ ws_handshake_header({recv, http_eoh}, #ws_state{
 	
 	UpgradeContainsWebsocket = lists:member(<<"websocket">>, Upgrade),
 	ConnectionContainsUpgrade = lists:member(<<"upgrade">>, Connection),
-	MatchedRequestHandler = case (catch url_decode_q_split(Path)) of 
-		{'EXIT', _} -> undefined;
-		{NPath, _Query} -> 
-			LPath = [path_decode(NPE) || NPE <- string:tokens(NPath, "/")],
-			find_request_handler(RequestHandlers, to_normalized_path(LPath))
+	MatchedRequestHandler = case Path of 
+		undefined -> undefined;
+		P -> find_request_handler(RequestHandlers, P)
 	end,
 
 	{Status, Response} = if
@@ -232,7 +247,8 @@ ws_handshake_header({recv, http_eoh}, #ws_state{
 					Version, 400, "Bad request: need exactly one 'Host' header", [])};
 		not UpgradeContainsWebsocket ->
 			{failure, build_http_response(
-					Version, 400, "Bad request: 'Upgrade' header doesn't include 'websocket'", [])};
+	
+						Version, 400, "Bad request: 'Upgrade' header doesn't include 'websocket'", [])};
 		not ConnectionContainsUpgrade ->
 			{failure, build_http_response(
 					Version, 400, "Bad request: 'Connection' header doesn't include 'upgrade'", [])};
@@ -264,8 +280,57 @@ ws_handshake_header({recv, http_eoh}, #ws_state{
 
 	{next_state, ws_session, State}.
 
-ws_session({recv, Data}, State) ->
+% TODO: add request handlers support
+% TODO: validate origin
+ws_session({recv, Data}, #ws_state{
+		sockmod = SockMod,
+		socket = Socket,
+		request_headers = RequestHeaders,
+		parsing_state = ParsingState,
+		xmpp_ref = XmppRef
+	} = State) ->
+	{Frames, NewParsingState} = websocket_frame:parse_stream(ParsingState, Data),
+	NewXmppRef = lists:foldl(fun(Frame, Ref) ->
+				PeerRet = case SockMod of
+					gen_tcp ->
+						inet:peername(Socket);
+					_ ->
+						SockMod:peername(Socket)
+				end,
+				IP = case PeerRet of
+					{ok, IPHere} ->
+						XFF = case RequestHeaders of
+							#{<<"x-forwarded-for">> := Value} -> Value;
+							_ -> []
+						end,
+						#{<<"host">> := [Host]} = RequestHeaders,
+						analyze_ip_xff(IPHere, XFF, Host);
+					{error, _Error} ->
+						undefined
+				end,
+				{_, _, NewRef} = websocket_xmpp:process_request(
+					SockMod,
+					Socket,
+					Ref,
+					websocket_frame:get_payload(Frame),
+					IP,
+					self()),
+				NewRef
+		end, XmppRef, Frames),
+	{next_state, ws_session, State#ws_state{
+			parsing_state = NewParsingState,
+			xmpp_ref = NewXmppRef
+		}};
+
+ws_session({send, Data}, #ws_state{
+		sockmod = SockMod,
+		socket = Socket
+	} = State) ->
+	Frame = websocket_frame:make(Data),
+	FrameBin = websocket_frame:to_binary(Frame),
+	SockMod:send(Socket, FrameBin),
 	{next_state, ws_session, State}.
+
 
 %-------------------------------------------------------------------------------
 % Internal functions
@@ -660,7 +725,7 @@ sub_protocol(Headers) ->
 analyze_ip_xff(IP, [], _Host) ->
 	IP;
 analyze_ip_xff({IPLast, Port}, XFF, Host) ->
-	[ClientIP | ProxiesIPs] = string:tokens(XFF, ", ")
+	[ClientIP | ProxiesIPs] = XFF
 	++ [inet_parse:ntoa(IPLast)],
 	TrustedProxies = case ejabberd_config:get_local_option(
 			{trusted_proxies, Host}) of
