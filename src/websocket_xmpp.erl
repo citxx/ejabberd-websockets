@@ -38,8 +38,8 @@
                                 % idle sessions
 -define(MAX_PAUSE, 120). % may num of sec a client is allowed to pause
                          % the session
--define(NS_CLIENT, "jabber:client").
--define(NS_STREAM, "http://etherx.jabber.org/streams").
+-define(NS_CLIENT, <<"jabber:client">>).
+-define(NS_STREAM, <<"http://etherx.jabber.org/streams">>).
 -define(TEST, 1).
 %%  Erlang Records for state
 -record(wsr, {socket, sockmod, key, out}).
@@ -280,14 +280,16 @@ handle_sync_event(#wsr{out=Payload, socket=WSocket, sockmod=WSockmod},
 			{reply, Reply, StateName, StateData};
 		C2SPid ->
 			?DEBUG("really sending now: ~p", [Payload]),
-			lists:foreach(
-				fun({xmlstreamend, End}) ->
+			lists:foreach(fun
+					({xmlstreamend, End}) ->
 						gen_fsm:send_event(
 							C2SPid, {xmlstreamend, End});
 					({xmlelement, "stream:stream", Attrs, []}) ->
 						send_stream_start(C2SPid, Attrs);
 					({xmlstreamstart, "stream:stream", Attrs}) ->
 						send_stream_start(C2SPid, Attrs);
+					(<<" ">>) ->  % Workaround to support blank xmpp pings
+						send_text(StateData, <<" ">>);
 					(El) ->
 						gen_fsm:send_event(
 							C2SPid, {xmlstreamelement, El})
@@ -360,8 +362,9 @@ handle_info(_, StateName, StateData) ->
 %% Purpose: Shutdown the fsm
 %% Returns: any
 %%----------------------------------------------------------------------
-terminate(_Reason, _StateName, StateData) ->
-    ?DEBUG("terminate: Deleting session ~s", [StateData#state.id]),
+terminate(Reason, _StateName, StateData) ->
+    ?DEBUG("terminate: Deleting session ~s~nReason = ~p~n",
+			[StateData#state.id, Reason]),
     send_receiver_reply(StateData#state.websocket_receiver, {ok, terminate}),
     case StateData#state.waiting_input of
 	false ->
@@ -377,12 +380,12 @@ stream_start(ParsedPayload) ->
     ?DEBUG("~p~n",[ParsedPayload]),
     case ParsedPayload of
         {xmlelement, "stream:stream", Attrs, _} ->
-            {"to",Host} = lists:keyfind("to", 1, Attrs),
+            {<<"to">>, Host} = lists:keyfind(<<"to">>, 1, Attrs),
             Sid = sha:sha(term_to_binary({now(), make_ref()})),
             Key = "",
             {Host, Sid, Key};
         {xmlstreamstart, _Name, Attrs} ->
-            {"to",Host} = lists:keyfind("to", 1, Attrs),
+            {<<"to">>, Host} = lists:keyfind(<<"to">>, 1, Attrs),
             Sid = sha:sha(term_to_binary({now(), make_ref()})),
             Key = "",
             {Host, Sid, Key};
@@ -392,27 +395,32 @@ stream_start(ParsedPayload) ->
 %% validate request sent. ensure that its parsable XMPP
 validate_request(Data, PayloadSize, MaxStanzaSize) ->
 	?DEBUG("--- incoming data --- ~n~s~n --- END --- ", [Data]),
-	case xml_stream:parse_element(Data) of
-		{error, Reason} ->
-			?DEBUG("Parse error: ~p", [Reason]),
-			%% detect stream start and stream end
-			case stream_start_end(Data) of
-				{xmlstreamstart, Name, Attrs} ->
-					?DEBUG("Stream start: ~p", [Name]),
-					{ok, {xmlstreamstart, Name, Attrs}};
-				{xmlstreamend, End} ->
-					?DEBUG("Stream end: ~p", [End]),
-					{ok, {xmlstreamend, End}};
-				_ ->
-					?ERROR_MSG("Bad xml data: ~p~n", [Reason]),
-					{error, bad_request}
-			end;
-		ParsedData ->
-			?DEBUG("Parsed", []),
-			if PayloadSize =< MaxStanzaSize ->
-					{ok, ParsedData};
-				true ->
-					{size_limit, {}}
+	case re:run(Data, "^\s*$") of
+		{match, _} ->
+			{ok, <<" ">>};  % Workaround to support blank xmpp pings
+		nomatch ->
+			case xml_stream:parse_element(Data) of
+				{error, Reason} ->
+					?DEBUG("Parse error: ~p", [Reason]),
+					%% detect stream start and stream end
+					case stream_start_end(Data) of
+						{xmlstreamstart, Name, Attrs} ->
+							?DEBUG("Stream start: ~p", [Name]),
+							{ok, {xmlstreamstart, Name, Attrs}};
+						{xmlstreamend, End} ->
+							?DEBUG("Stream end: ~p", [End]),
+							{ok, {xmlstreamend, End}};
+						_ ->
+							?ERROR_MSG("Bad xml data: ~p~n", [Reason]),
+							{error, bad_request}
+					end;
+				ParsedData ->
+					?DEBUG("Parsed", []),
+					if PayloadSize =< MaxStanzaSize ->
+							{ok, ParsedData};
+						true ->
+							{size_limit, {}}
+					end
 			end
 	end.
 
@@ -429,62 +437,62 @@ send_text(StateData, Text) ->
 %[0, Text, 255]).
 
 send_element(StateData, {xmlstreamstart, Name, Attrs}) ->
-    XmlString = streamstart_tobinary({xmlstreamstart, Name, Attrs}),
-    send_text(StateData, XmlString);
-send_element(StateData, {xmlstreamend, "stream:stream"}) ->
-    send_text(StateData, <<"</stream:stream>">>);
+	XmlString = streamstart_tobinary({xmlstreamstart, Name, Attrs}),
+	send_text(StateData, XmlString);
+send_element(StateData, {xmlstreamend, <<"stream:stream">>}) ->
+	send_text(StateData, <<"</stream:stream>">>);
 send_element(StateData, El) ->
-    send_text(StateData, xml:element_to_binary(El)).
+	send_text(StateData, xml:element_to_binary(El)).
 
 send_stream_start(C2SPid, Attrs) ->
-    StreamTo = case lists:keyfind("to", 1, Attrs) of
-                   {"to", Ato} ->
-                       case lists:keyfind("version",
-                                          1, Attrs) of
-                           {"version", AVersion} ->
-                               {Ato, AVersion};
-                           _ ->
-                               {Ato, ""}
-                       end
-               end,
-    case StreamTo of
-        {To, ""} ->
-            gen_fsm:send_event(
-              C2SPid,
-              {xmlstreamstart, "stream:stream",
-               [{"to", To},
-                {"xmlns", ?NS_CLIENT},
-                {"xmlns:stream", ?NS_STREAM}]});
-        {To, Version} ->
-            gen_fsm:send_event(
-              C2SPid,
-              {xmlstreamstart, "stream:stream",
-               [{"to", To},
-                {"xmlns", ?NS_CLIENT},
-                {"version", Version},
-                {"xmlns:stream", ?NS_STREAM}]})
-    end.
+	StreamTo = case lists:keyfind(<<"to">>, 1, Attrs) of
+		{<<"to">>, Ato} ->
+			case lists:keyfind(<<"version">>,
+					1, Attrs) of
+				{<<"version">>, AVersion} ->
+					{Ato, AVersion};
+				_ ->
+					{Ato, <<>>}
+			end
+	end,
+	case StreamTo of
+		{To, <<>>} ->
+			gen_fsm:send_event(
+				C2SPid,
+				{xmlstreamstart, <<"stream:stream">>,
+					[{<<"to">>, To},
+						{<<"xmlns">>, ?NS_CLIENT},
+						{<<"xmlns:stream">>, ?NS_STREAM}]});
+		{To, Version} ->
+			gen_fsm:send_event(
+				C2SPid,
+				{xmlstreamstart, <<"stream:stream">>,
+					[{<<"to">>, To},
+						{<<"xmlns">>, ?NS_CLIENT},
+						{<<"version">>, Version},
+						{<<"xmlns:stream">>, ?NS_STREAM}]})
+	end.
 send_data(FsmRef, Req) ->
-    ?DEBUG("session pid:~p~n", [FsmRef]),
-    case FsmRef of
-        false ->
-            ?DEBUG("No session started.",[]);
-        _ ->
-            ?DEBUG("Writing data!. ~p",[Req]),
-            %% write data to c2s
-            gen_fsm:sync_send_all_state_event(FsmRef, Req)
-    end.
+	?DEBUG("session pid:~p~n", [FsmRef]),
+	case FsmRef of
+		false ->
+			?DEBUG("No session started.",[]);
+		_ ->
+			?DEBUG("Writing data!. ~p",[Req]),
+			%% write data to c2s
+			gen_fsm:sync_send_all_state_event(FsmRef, Req)
+	end.
 %% Cancel timer and empty message queue.
 cancel_timer(undefined) ->
-    ok;
+	ok;
 cancel_timer(Timer) ->
-    erlang:cancel_timer(Timer),
-    receive
-	{timeout, Timer, _} ->
-	    ok
-    after 0 ->
-	    ok
-    end.
+	erlang:cancel_timer(Timer),
+	receive
+		{timeout, Timer, _} ->
+			ok
+	after 0 ->
+			ok
+	end.
 
 %% If client asked for a pause (pause > 0), we apply the pause value
 %% as inactivity timer:
@@ -492,42 +500,42 @@ set_inactivity_timer(Pause, _MaxInactivity) when Pause > 0 ->
     erlang:start_timer(Pause*1000, self(), []);
 %% Otherwise, we apply the max_inactivity value as inactivity timer:
 set_inactivity_timer(_Pause, MaxInactivity) ->
-    erlang:start_timer(MaxInactivity, self(), []).
+	erlang:start_timer(MaxInactivity, self(), []).
 
 stream_start_end(Data) when is_binary(Data) ->
-    %% find <stream:stream>
-    case re:run(Data, "\<stream\:stream.+\>", []) of
-        {match, _X} ->
-					?DEBUG("Stream matched", []),
-            %% find to and version
-            To = case re:run(Data,
-                             "to=[\"']?((?:.(?![\"\']?\\s+(?:\\S+)=|[>\"\']))+.)[\"\']?", [{capture,[1]}]) of
-                     {match, [{Start, Length}]} ->
-												binary:part(Data, Start, Length);
-                     _ ->
-                         undefined
-                 end,
-            Version = case re:run(Data,
-                            "version=[\"']?((?:.(?![\"\']?\\s+(?:\\S+)=|[>\"\']))+.)[\"\']?", [{capture,[1]}]) of
-                          {match, [{St, Len}]} ->
-														binary:part(Data, St, Len);
-                          T ->
-                              T
-                      end,
-            {xmlstreamstart, "stream:stream", [{"to", To},
-                                               {"version", Version},
-                                               {"xmlns", ?NS_CLIENT},
-                                               {"xmlns:stream", ?NS_STREAM}]};
-        nomatch ->
-					?DEBUG("Stream not matched", []),
-            %% find </stream:stream>
-            case re:run(Data, "^</stream:stream>", [global]) of
-                {match, _Loc} ->
-                    {xmlstreamend, "stream:stream"};
-                nomatch ->
-                    false
-            end
-    end.
+	%% find <stream:stream>
+	case re:run(Data, "<stream:stream.+>") of
+		{match, _X} ->
+			?DEBUG("Stream matched", []),
+			%% find to and version
+			To = case re:run(Data,
+					"to=[\"']?((?:.(?![\"\']?\\s+(?:\\S+)=|[>\"\']))+.)[\"\']?", [{capture, [1]}]) of
+				{match, [{Start, Length}]} ->
+					binary:part(Data, Start, Length);
+				_ ->
+					undefined
+			end,
+			Version = case re:run(Data,
+					"version=[\"']?((?:.(?![\"\']?\\s+(?:\\S+)=|[>\"\']))+.)[\"\']?", [{capture, [1]}]) of
+				{match, [{St, Len}]} ->
+					binary:part(Data, St, Len);
+				T ->
+					T
+			end,
+			{xmlstreamstart, "stream:stream", [{<<"to">>, To},
+					{<<"version">>, Version},
+					{<<"xmlns">>, ?NS_CLIENT},
+					{<<"xmlns:stream">>, ?NS_STREAM}]};
+		nomatch ->
+			?DEBUG("Stream not matched", []),
+			%% find </stream:stream>
+			case re:run(Data, "^</stream:stream>", [global]) of
+				{match, _Loc} ->
+					{xmlstreamend, <<"stream:stream">>};
+				nomatch ->
+					false
+			end
+	end.
 
 streamstart_tobinary({xmlstreamstart, Name, Attrs}) ->
     XmlStrListStart = io_lib:format("<~s",[Name]),

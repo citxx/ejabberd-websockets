@@ -227,9 +227,11 @@ ws_handshake_header({recv, http_eoh}, #ws_state{
 	SecWebSocketKey = maps:get(<<"sec-websocket-key">>, Headers, []),
 	?DEBUG("SecWebSocketKey = ~p of ~p", [SecWebSocketKey, 1]),
 	SecWebSocketVersion = maps:get(<<"sec-websocket-version">>, Headers, []),
+	SecWebSocketProtocol = maps:get(<<"sec-websocket-protocol">>, Headers, []),
 	
 	UpgradeContainsWebsocket = lists:member(<<"websocket">>, Upgrade),
 	ConnectionContainsUpgrade = lists:member(<<"upgrade">>, Connection),
+	ProtocolContainsXmpp = lists:member(<<"xmpp">>, SecWebSocketProtocol),
 	MatchedRequestHandler = case Path of 
 		undefined -> undefined;
 		P -> find_request_handler(RequestHandlers, P)
@@ -247,11 +249,13 @@ ws_handshake_header({recv, http_eoh}, #ws_state{
 					Version, 400, "Bad request: need exactly one 'Host' header", [])};
 		not UpgradeContainsWebsocket ->
 			{failure, build_http_response(
-	
 						Version, 400, "Bad request: 'Upgrade' header doesn't include 'websocket'", [])};
 		not ConnectionContainsUpgrade ->
 			{failure, build_http_response(
 					Version, 400, "Bad request: 'Connection' header doesn't include 'upgrade'", [])};
+		not ProtocolContainsXmpp ->
+			{failure, build_http_response(
+					Version, 400, "Bad request: 'Sec-WebSocket-Protocol' doesn't include 'xmpp'", [])};
 		length(SecWebSocketKey) =/= 1 ->
 			{failure, build_http_response(
 					Version, 400, "Bad request: need exactly one 'Sec-WebSocket-Key' header", [])};
@@ -273,7 +277,8 @@ ws_handshake_header({recv, http_eoh}, #ws_state{
 					Version, 101, "Switching protocol to XMPP over WebSocket", [
 						{<<"Upgrade">>, <<"websocket">>},
 						{<<"Connection">>, <<"Upgrade">>},
-						{<<"Sec-WebSocket-Accept">>, ResponseKey}])}
+						{<<"Sec-WebSocket-Accept">>, ResponseKey},
+						{<<"Sec-WebSocket-Protocol">>, <<"xmpp">>}])}
 	end,
 	
 	SockMod:send(Socket, Response),
