@@ -14,7 +14,8 @@
 %% API
 -export([
 		start_link/2,
-		send/2
+		send/2,
+		close/2
 	]).
 
 %% Listener callbacks
@@ -92,6 +93,10 @@ start_link(SockData, Opts) ->
 -spec send(process_reference(), iodata()) -> ok.
 send(WsSessionRef, Message) ->
 	gen_fsm:send_event(WsSessionRef, {send, Message}).
+
+-spec close(process_reference(), term()) -> ok.
+close(WsSessionRef, Reason) ->
+	gen_fsm:send_event(WsSessionRef, {close, Reason}).
 
 
 %-------------------------------------------------------------------------------
@@ -288,39 +293,12 @@ ws_handshake_header({recv, http_eoh}, #ws_state{
 % TODO: add request handlers support
 % TODO: validate origin
 ws_session({recv, Data}, #ws_state{
-		sockmod = SockMod,
-		socket = Socket,
-		request_headers = RequestHeaders,
 		parsing_state = ParsingState,
 		xmpp_ref = XmppRef
 	} = State) ->
 	{Frames, NewParsingState} = websocket_frame:parse_stream(ParsingState, Data),
 	NewXmppRef = lists:foldl(fun(Frame, Ref) ->
-				PeerRet = case SockMod of
-					gen_tcp ->
-						inet:peername(Socket);
-					_ ->
-						SockMod:peername(Socket)
-				end,
-				IP = case PeerRet of
-					{ok, IPHere} ->
-						XFF = case RequestHeaders of
-							#{<<"x-forwarded-for">> := Value} -> Value;
-							_ -> []
-						end,
-						#{<<"host">> := [Host]} = RequestHeaders,
-						analyze_ip_xff(IPHere, XFF, Host);
-					{error, _Error} ->
-						undefined
-				end,
-				{_, _, NewRef} = websocket_xmpp:process_request(
-					SockMod,
-					Socket,
-					Ref,
-					websocket_frame:get_payload(Frame),
-					IP,
-					self()),
-				NewRef
+				process_frame(Frame, Ref, State)
 		end, XmppRef, Frames),
 	{next_state, ws_session, State#ws_state{
 			parsing_state = NewParsingState,
@@ -334,12 +312,50 @@ ws_session({send, Data}, #ws_state{
 	Frame = websocket_frame:make(Data),
 	FrameBin = websocket_frame:to_binary(Frame),
 	SockMod:send(Socket, FrameBin),
-	{next_state, ws_session, State}.
+	{next_state, ws_session, State};
+
+ws_session({close, Reason}, #ws_state{
+	} = State) ->
+	ok.
 
 
 %-------------------------------------------------------------------------------
 % Internal functions
 %-------------------------------------------------------------------------------
+
+-spec process_frame(websocket_frame:frame(), process_reference()) ->
+	process_reference().
+process_frame(Frame, Ref, #ws_state{
+		sockmod = SockMod,
+		socket = Socket,
+		request_headers = RequestHeaders
+	} = _State) ->
+	PeerRet = case SockMod of
+		gen_tcp ->
+			inet:peername(Socket);
+		_ ->
+			SockMod:peername(Socket)
+	end,
+	IP = case PeerRet of
+		{ok, IPHere} ->
+			XFF = case RequestHeaders of
+				#{<<"x-forwarded-for">> := Value} -> Value;
+				_ -> []
+			end,
+			#{<<"host">> := [Host]} = RequestHeaders,
+			analyze_ip_xff(IPHere, XFF, Host);
+		{error, _Error} ->
+			undefined
+	end,
+	{_, _, NewRef} = websocket_xmpp:process_request(
+		SockMod,
+		Socket,
+		Ref,
+		websocket_frame:get_payload(Frame),
+		IP,
+		self()),
+	NewRef.
+
 
 -spec add_header(atom() | iodata(), iodata(), map()) -> map().
 add_header(Name, Value, HeadersMap) ->

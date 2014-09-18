@@ -1,13 +1,23 @@
 -module(websocket_frame).
 
 -export([
+	get_payload/1,
+	make/1,
+	make/2,
+	make_binary/1,
+	make_binary/2,
+	make_close/0,
+	make_close/2,
+	make_close/3,
+	make_ping/0,
+	make_ping/1,
+	make_ping/2,
+	make_pong/1,
+	make_pong/2,
 	new_parsing_state/0,
 	parse_stream/1,
 	parse_stream/2,
-	make/1,
-	make/2,
-	to_binary/1,
-	get_payload/1
+	to_binary/1
 ]).
 
 -export_types([
@@ -44,18 +54,68 @@ make(Data) ->
 	make(Data, []).
 
 -spec make(iodata(), [term()]) -> frame().
-make(Data, _Options) ->
+make(Data, Options) ->
+	Fin = boolean_to_integer(proplists:get_value(fin, Options, true)),
+	Rsv1 = boolean_to_integer(proplists:get_value(rsv1, Options, false)),
+	Rsv2 = boolean_to_integer(proplists:get_value(rsv2, Options, false)),
+	Rsv3 = boolean_to_integer(proplists:get_value(rsv3, Options, false)),
+	Opcode = proplists:get_value(opcode, Options, 1),
+	{Mask, MaskingKey} = case proplists:get_value(masking_key, Options) of
+		undefined -> {0, <<>>};
+		Key -> {1, Key}
+	end,
 	DataBin = iolist_to_binary(Data),
 	#ws_frame{
-		fin = 1,
-		rsv1 = 0,
-		rsv2 = 0,
-		rsv3 = 0,
-		opcode = 1,
-		mask = 0,
+		fin = Fin,
+		rsv1 = Rsv1,
+		rsv2 = Rsv2,
+		rsv3 = Rsv3,
+		opcode = Opcode,
+		mask = Mask,
+		masking_key = MaskingKey,
 		payload_length = byte_size(DataBin),
 		payload_data = DataBin
 	}.
+
+-spec make_binary(iodata()) -> frame().
+make_binary(Data) ->
+	make_binary(Data, []).
+
+-spec make_binary(iodata(), [term()]) -> frame().
+make_binary(Data, Options) ->
+	make(Data, [{opcode, ?WS_OPCODE_BINARY} | Options]).
+
+-spec make_ping() -> frame().
+make_ping() ->
+	make_ping(<<>>).
+
+-spec make_ping(iodata()) -> frame().
+make_ping(Data) ->
+	make_ping(Data, []).
+
+-spec make_ping(iodata(), [term()]) -> frame().
+make_ping(Data, Options) ->
+	make(Data, [{opcode, ?WS_OPCODE_PING} | Options]).
+
+-spec make_pong(iodata()) -> frame().
+make_pong(Data) ->
+	make_pong(Data, []).
+
+-spec make_pong(iodata(), [term()]) -> frame().
+make_pong(Data, Options) ->
+	make(Data, [{opcode, ?WS_OPCODE_PONG} | Options]).
+
+-spec make_close() -> frame().
+make_close() ->
+	make(<<>>, [{opcode, ?WS_OPCODE_CLOSE}]).
+
+-spec make_close(integer(), iodata()) -> frame().
+make_close(Code, Data) ->
+	make_close(Code, Data, []).
+
+-spec make_close(integer(), iodata(), [term()]) -> frame().
+make_close(Code, Data, Options) ->
+	make([<<Code:16>>, Data], [{?WS_OPCODE_CLOSE, 16#8} | Options]).
 
 -spec to_binary(frame()) -> binary().
 to_binary(#ws_frame{
@@ -257,3 +317,8 @@ mask1(<<DataByte:8, DataRest/binary>>, <<KeyByte:8, KeyRest/binary>>, Result) ->
 		<<KeyRest/binary, KeyByte>>,
 		<<Result/binary, (DataByte bxor KeyByte)>>).
 
+-spec boolean_to_integer(boolean() | 0 | 1) -> 0 | 1.
+boolean_to_integer(true) -> 1;
+boolean_to_integer(false) -> 0;
+boolean_to_integer(1) -> 1;
+boolean_to_integer(0) -> 0.
