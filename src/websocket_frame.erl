@@ -107,7 +107,7 @@ make_pong(Data, Options) ->
 
 -spec make_close() -> frame().
 make_close() ->
-	make(<<>>, [{opcode, ?WS_OPCODE_CLOSE}]).
+	make_close(?WS_CLOSE_NORMAL, <<>>).
 
 -spec make_close(integer(), iodata()) -> frame().
 make_close(Code, Data) ->

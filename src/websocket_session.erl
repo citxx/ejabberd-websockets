@@ -15,7 +15,8 @@
 -export([
 		start_link/2,
 		send/2,
-		close/2
+		close/1,
+		close/3
 	]).
 
 %% Listener callbacks
@@ -42,6 +43,7 @@
 -include("ejabberd.hrl").
 -include("logger.hrl").
 -include("jlib.hrl").
+-include("websocket_frame.hrl").
 -include("websocket_session.hrl").
 
 %% record used to keep track of listener state
@@ -92,11 +94,18 @@ start_link(SockData, Opts) ->
 
 -spec send(process_reference(), iodata()) -> ok.
 send(WsSessionRef, Message) ->
-	gen_fsm:send_event(WsSessionRef, {send, Message}).
+	gen_fsm:send_event(WsSessionRef, {send, Message}),
+	ok.
 
--spec close(process_reference(), term()) -> ok.
-close(WsSessionRef, Reason) ->
-	gen_fsm:send_event(WsSessionRef, {close, Reason}).
+-spec close(process_reference(), integer(), term()) -> ok.
+close(WsSessionRef, Code, Reason) ->
+	gen_fsm:send_event(WsSessionRef, {close, Code, Reason}),
+	ok.
+
+-spec close(process_reference()) -> ok.
+close(WsSessionRef) ->
+	gen_fsm:send_event(WsSessionRef, close),
+	ok.
 
 
 %-------------------------------------------------------------------------------
@@ -293,43 +302,22 @@ ws_handshake_header({recv, http_eoh}, #ws_state{
 % TODO: add request handlers support
 % TODO: validate origin
 ws_session({recv, Data}, #ws_state{
-		parsing_state = ParsingState,
-		xmpp_ref = XmppRef
+		parsing_state = ParsingState
 	} = State) ->
 	{Frames, NewParsingState} = websocket_frame:parse_stream(ParsingState, Data),
-	NewXmppRef = lists:foldl(fun(Frame, Ref) ->
-				process_frame(Frame, Ref, State)
-		end, XmppRef, Frames),
+	lists:foreach(fun(Frame) ->
+				gen_fsm:send_event(self(), {recv_frame, Frame})
+		end, Frames),
 	{next_state, ws_session, State#ws_state{
-			parsing_state = NewParsingState,
-			xmpp_ref = NewXmppRef
+			parsing_state = NewParsingState
 		}};
 
-ws_session({send, Data}, #ws_state{
-		sockmod = SockMod,
-		socket = Socket
-	} = State) ->
-	Frame = websocket_frame:make(Data),
-	FrameBin = websocket_frame:to_binary(Frame),
-	SockMod:send(Socket, FrameBin),
-	{next_state, ws_session, State};
-
-ws_session({close, Reason}, #ws_state{
-	} = State) ->
-	ok.
-
-
-%-------------------------------------------------------------------------------
-% Internal functions
-%-------------------------------------------------------------------------------
-
--spec process_frame(websocket_frame:frame(), process_reference()) ->
-	process_reference().
-process_frame(Frame, Ref, #ws_state{
+ws_session({recv_frame, #ws_frame{opcode = ?WS_OPCODE_TEXT} = Frame}, #ws_state{
 		sockmod = SockMod,
 		socket = Socket,
-		request_headers = RequestHeaders
-	} = _State) ->
+		request_headers = RequestHeaders,
+		xmpp_ref = XmppRef
+	} = State) ->
 	PeerRet = case SockMod of
 		gen_tcp ->
 			inet:peername(Socket);
@@ -347,15 +335,48 @@ process_frame(Frame, Ref, #ws_state{
 		{error, _Error} ->
 			undefined
 	end,
-	{_, _, NewRef} = websocket_xmpp:process_request(
+	{_, _, NewXmppRef} = websocket_xmpp:process_request(
 		SockMod,
 		Socket,
-		Ref,
+		XmppRef,
 		websocket_frame:get_payload(Frame),
 		IP,
 		self()),
-	NewRef.
+	{next_state, ws_session, State#ws_state{
+			xmpp_ref = NewXmppRef
+		}};
 
+ws_session({send, Data}, #ws_state{
+		sockmod = SockMod,
+		socket = Socket
+	} = State) ->
+	Frame = websocket_frame:make(Data),
+	FrameBin = websocket_frame:to_binary(Frame),
+	SockMod:send(Socket, FrameBin),
+	{next_state, ws_session, State};
+
+ws_session(close, #ws_state{
+		sockmod = SockMod,
+		socket = Socket
+	} = State) ->
+	ClosingFrame = websocket_frame:make_close(),
+	ClosingFrameBin = websocket_frame:to_binary(ClosingFrame),
+	SockMod:send(Socket, ClosingFrameBin),
+	{next_state, ws_closing, State};
+
+ws_session({close, Code, Reason}, #ws_state{
+		sockmod = SockMod,
+		socket = Socket
+	} = State) ->
+	ClosingFrame = websocket_frame:make_close(Code, Reason),
+	ClosingFrameBin = websocket_frame:to_binary(ClosingFrame),
+	SockMod:send(Socket, ClosingFrameBin),
+	{next_state, ws_closing, State}.
+
+
+%-------------------------------------------------------------------------------
+% Internal functions
+%-------------------------------------------------------------------------------
 
 -spec add_header(atom() | iodata(), iodata(), map()) -> map().
 add_header(Name, Value, HeadersMap) ->

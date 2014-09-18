@@ -40,7 +40,6 @@
                          % the session
 -define(NS_CLIENT, <<"jabber:client">>).
 -define(NS_STREAM, <<"http://etherx.jabber.org/streams">>).
--define(TEST, 1).
 %%  Erlang Records for state
 -record(wsr, {socket, sockmod, key, out}).
 

@@ -8,7 +8,6 @@
 -author('nathan.zorn@gmail.com').
 
 -define(MOD_WEBSOCKET_VERSION, "0.1").
--define(TEST, ok).
 -define(PROCNAME_MHB, ejabberd_mod_websocket).
 
 -behaviour(gen_mod).
