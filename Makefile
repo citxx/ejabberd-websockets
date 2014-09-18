@@ -6,7 +6,7 @@ INCLUDE_DIR=${DESTDIR}/lib/ejabberd/include
 .PHONY: compile
 compile: src/*.erl src/*.hrl Emakefile
 	mkdir -p ebin
-	erl -pa ${EBINDIR} -make
+	erl -pa ${EBIN_DIR} -make
 
 .PHONY: install
 install:
