@@ -1,7 +1,7 @@
 DESTDIR=/usr
 
-EBIN_DIR=${DESTDIR}/lib/ejabberd/ebin
-INCLUDE_DIR=${DESTDIR}/lib/ejabberd/include
+EBIN_DIR=${DESTDIR}/usr/lib/ejabberd/ebin
+INCLUDE_DIR=${DESTDIR}/usr/lib/ejabberd/include
 
 .PHONY: compile
 compile: src/* rebar.config rebar
