@@ -35,6 +35,7 @@
 	]).
 
 -export([
+		ws_close/2,
 		ws_handshake_request/2,
 		ws_handshake_header/2,
 		ws_session/2
@@ -81,7 +82,8 @@
 		request_headers = #{} :: map(),
 		parsing_state = websocket_frame:new_parsing_state() ::
 			websocket_frame:parsing_state(),
-		xmpp_ref = undefined
+		xmpp_ref = undefined,
+		receiving_frames = false
 	}).
 
 %-------------------------------------------------------------------------------
@@ -175,14 +177,36 @@ terminate(Reason, StateName, State) ->
 	ok.
 
 % TODO: add tls support
-handle_info({_Type, Socket, Data}, StateName, State) ->
+handle_info({_Type, Socket, Data}, StateName, #ws_state{
+		parsing_state = ParsingState,
+		receiving_frames = ReceivingFrames
+	} = State) ->
 	?DEBUG("Recieved raw data: ~p", [Data]),
 	SwitchToRaw = case Data of
 		http_eoh -> [{packet, raw}];
 		_ -> []
 	end,
+	StateRF = case Data of
+		http_eoh -> State#ws_state{receiving_frames = true};
+		_ -> State
+	end,
+
+	% TODO: add request handlers support
+	% TODO: validate origin
+	NewState = case ReceivingFrames of
+		false ->
+			gen_fsm:send_event(self(), {recv, Data}),
+			StateRF;
+		true ->
+			{Frames, NewParsingState} = websocket_frame:parse_stream(ParsingState, Data),
+			lists:foreach(fun(Frame) ->
+						gen_fsm:send_event(self(), {recv, Frame})
+				end, Frames),
+			State#ws_state{parsing_state = NewParsingState}
+	end,
+
 	inet:setopts(Socket, [{active, once} | SwitchToRaw]),
-	apply(?MODULE, StateName, [{recv, Data}, State]);
+	{next_state, StateName, NewState};
 
 % TODO: proper tcp_closed handling
 handle_info({tcp_closed, _Socket}, _StateName, State) ->
@@ -299,20 +323,7 @@ ws_handshake_header({recv, http_eoh}, #ws_state{
 
 	{next_state, ws_session, State}.
 
-% TODO: add request handlers support
-% TODO: validate origin
-ws_session({recv, Data}, #ws_state{
-		parsing_state = ParsingState
-	} = State) ->
-	{Frames, NewParsingState} = websocket_frame:parse_stream(ParsingState, Data),
-	lists:foreach(fun(Frame) ->
-				gen_fsm:send_event(self(), {recv_frame, Frame})
-		end, Frames),
-	{next_state, ws_session, State#ws_state{
-			parsing_state = NewParsingState
-		}};
-
-ws_session({recv_frame, #ws_frame{opcode = ?WS_OPCODE_TEXT} = Frame}, #ws_state{
+ws_session({recv, #ws_frame{opcode = ?WS_OPCODE_TEXT} = Frame}, #ws_state{
 		sockmod = SockMod,
 		socket = Socket,
 		request_headers = RequestHeaders,
@@ -346,6 +357,21 @@ ws_session({recv_frame, #ws_frame{opcode = ?WS_OPCODE_TEXT} = Frame}, #ws_state{
 			xmpp_ref = NewXmppRef
 		}};
 
+ws_session({recv, #ws_frame{
+		opcode = ?WS_OPCODE_CLOSE,
+		payload_data = Data
+	}}, #ws_state{
+		sockmod = SockMod,
+		socket = Socket
+	} = State) ->
+Frame = case Data of
+		<<>> -> websocket_frame:make_close();
+		<<Status:16, Message/binary>> -> websocket_frame:make_close(Status, Message)
+	end,
+	FrameBin = websocket_frame:to_binary(Frame),
+	SockMod:send(Socket, FrameBin),
+	{stop, normal, State};
+
 ws_session({send, Data}, #ws_state{
 		sockmod = SockMod,
 		socket = Socket
@@ -372,6 +398,9 @@ ws_session({close, Code, Reason}, #ws_state{
 	ClosingFrameBin = websocket_frame:to_binary(ClosingFrame),
 	SockMod:send(Socket, ClosingFrameBin),
 	{next_state, ws_closing, State}.
+
+ws_close({recv, #ws_frame{opcode = ?WS_OPCODE_CLOSE} = Frame}, State) ->
+	{stop, normal, State}.
 
 
 %-------------------------------------------------------------------------------

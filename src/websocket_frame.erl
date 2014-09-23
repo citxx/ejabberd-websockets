@@ -115,7 +115,7 @@ make_close(Code, Data) ->
 
 -spec make_close(integer(), iodata(), [term()]) -> frame().
 make_close(Code, Data, Options) ->
-	make([<<Code:16>>, Data], [{?WS_OPCODE_CLOSE, 16#8} | Options]).
+	make([<<Code:16>>, Data], [{opcode, ?WS_OPCODE_CLOSE} | Options]).
 
 -spec to_binary(frame()) -> binary().
 to_binary(#ws_frame{
