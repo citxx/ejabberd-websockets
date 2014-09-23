@@ -234,14 +234,18 @@ ws_handshake_request(
 			request_path = Path
 		}};
 
-% TODO: properly handle
-ws_handshake_request(Event, State) ->
+ws_handshake_request(Event, #ws_state{
+		sockmod = SockMod,
+		socket = Socket
+	} = State) ->
 	?WARNING_MSG(
 		"Unexpected event received in state ws_handshake_request:~n"
 		"  Event = ~p~n"
 		"  State = ~p~n",
 		[Event, State]),
-	{stop, normal, State}.
+	Response = build_http_response({1, 1}, 400, "Bad request", []),
+	SockMod:send(Socket, Response),
+	{stop, {error, "Got invalid http request"}, State}.
 	
 ws_handshake_header({recv, {http_header, _, Name, _, Value}}, #ws_state{
 		request_headers = Headers
@@ -321,7 +325,22 @@ ws_handshake_header({recv, http_eoh}, #ws_state{
 	
 	SockMod:send(Socket, Response),
 
-	{next_state, ws_session, State}.
+	case Status of
+		success ->
+			{next_state, ws_session, State};
+		failure ->
+			{stop, {error, Response}, State}
+	end.
+
+ws_session({recv, #ws_frame{opcode = ?WS_OPCODE_BINARY} = Frame}, #ws_state{
+		sockmod = SockMod,
+		socket = Socket
+	} = State) ->
+	ClosingFrame = websocket_frame:make_close(?WS_CLOSE_UNSUPPORTED_DATA_TYPE,
+		"XMPP over WebSocket forbid binary frames"),
+	send_frame(SockMod, Socket, ClosingFrame),
+	?WARNING_MSG("Got binary frame from client in XMPP over WebSocket session", []),
+	{stop, {error, "Got binary frame from client"}, State};
 
 ws_session({recv, #ws_frame{opcode = ?WS_OPCODE_TEXT} = Frame}, #ws_state{
 		sockmod = SockMod,
@@ -364,21 +383,30 @@ ws_session({recv, #ws_frame{
 		sockmod = SockMod,
 		socket = Socket
 	} = State) ->
-Frame = case Data of
+	ClosingFrame = case Data of
 		<<>> -> websocket_frame:make_close();
 		<<Status:16, Message/binary>> -> websocket_frame:make_close(Status, Message)
 	end,
-	FrameBin = websocket_frame:to_binary(Frame),
-	SockMod:send(Socket, FrameBin),
+	send_frame(SockMod, Socket, ClosingFrame),
 	{stop, normal, State};
+
+ws_session({recv, #ws_frame{
+		opcode = ?WS_OPCODE_PING,
+		payload_data = Data
+	}}, #ws_state{
+		sockmod = SockMod,
+		socket = Socket
+	} = State) ->
+	PongFrame = websocket_frame:make_pong(Data),
+	send_frame(SockMod, Socket, PongFrame),
+	{next_state, ws_session, State};
 
 ws_session({send, Data}, #ws_state{
 		sockmod = SockMod,
 		socket = Socket
 	} = State) ->
 	Frame = websocket_frame:make(Data),
-	FrameBin = websocket_frame:to_binary(Frame),
-	SockMod:send(Socket, FrameBin),
+	send_frame(SockMod, Socket, Frame),
 	{next_state, ws_session, State};
 
 ws_session(close, #ws_state{
@@ -386,8 +414,7 @@ ws_session(close, #ws_state{
 		socket = Socket
 	} = State) ->
 	ClosingFrame = websocket_frame:make_close(),
-	ClosingFrameBin = websocket_frame:to_binary(ClosingFrame),
-	SockMod:send(Socket, ClosingFrameBin),
+	send_frame(SockMod, Socket, ClosingFrame),
 	{next_state, ws_closing, State};
 
 ws_session({close, Code, Reason}, #ws_state{
@@ -395,8 +422,7 @@ ws_session({close, Code, Reason}, #ws_state{
 		socket = Socket
 	} = State) ->
 	ClosingFrame = websocket_frame:make_close(Code, Reason),
-	ClosingFrameBin = websocket_frame:to_binary(ClosingFrame),
-	SockMod:send(Socket, ClosingFrameBin),
+	send_frame(SockMod, Socket, ClosingFrame),
 	{next_state, ws_closing, State}.
 
 ws_close({recv, #ws_frame{opcode = ?WS_OPCODE_CLOSE} = Frame}, State) ->
@@ -406,6 +432,12 @@ ws_close({recv, #ws_frame{opcode = ?WS_OPCODE_CLOSE} = Frame}, State) ->
 %-------------------------------------------------------------------------------
 % Internal functions
 %-------------------------------------------------------------------------------
+
+-spec send_frame(atom(), term(), websocket_frame:frame()) -> ok.
+send_frame(SockMod, Socket, Frame) ->
+	FrameBin = websocket_frame:to_binary(),
+	SockMod:send(Socket, FrameBin),
+	ok.
 
 -spec add_header(atom() | iodata(), iodata(), map()) -> map().
 add_header(Name, Value, HeadersMap) ->
