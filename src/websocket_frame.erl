@@ -56,9 +56,9 @@ make(Data) ->
 -spec make(iodata(), [term()]) -> frame().
 make(Data, Options) ->
 	Fin = boolean_to_integer(proplists:get_value(fin, Options, true)),
-	Rsv1 = boolean_to_integer(proplists:get_value(rsv1, Options, false)),
-	Rsv2 = boolean_to_integer(proplists:get_value(rsv2, Options, false)),
-	Rsv3 = boolean_to_integer(proplists:get_value(rsv3, Options, false)),
+	Rsv1 = boolean_to_integer(proplists:get_bool(rsv1, Options)),
+	Rsv2 = boolean_to_integer(proplists:get_bool(rsv2, Options)),
+	Rsv3 = boolean_to_integer(proplists:get_bool(rsv3, Options)),
 	Opcode = proplists:get_value(opcode, Options, 1),
 	{Mask, MaskingKey} = case proplists:get_value(masking_key, Options) of
 		undefined -> {0, <<>>};
