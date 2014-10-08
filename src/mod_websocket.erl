@@ -25,6 +25,7 @@
 
 start(Host, _Opts) ->
 		?WARNING_MSG("~p loaded on ~s", [?MODULE, Host]),
+		ssl:start(),
     Proc = gen_mod:get_module_proc(Host, ?PROCNAME_MHB),
     ChildSpec =
         {Proc,

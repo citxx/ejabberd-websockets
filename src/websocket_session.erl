@@ -38,7 +38,8 @@
 		ws_closing/2,
 		ws_handshake_request/2,
 		ws_handshake_header/2,
-		ws_session/2
+		ws_session/2,
+		ws_setup/2
 	]).
 
 -include("ejabberd.hrl").
@@ -47,26 +48,6 @@
 -include("websocket_frame.hrl").
 -include("websocket_session.hrl").
 
-%% record used to keep track of listener state
--record(state, {sockmod,
-		socket,
-		request_method,
-		request_version,
-		request_path,
-		request_auth,
-		request_keepalive,
-		request_content_length,
-		request_lang = "en",
-		request_handlers = [],
-		request_host,
-		request_port,
-		request_tp,
-		request_headers = [],
-		end_of_request = false,
-		partial = <<>>,
-		websocket_pid,
-		trail = ""
-	}).
 
 -type process_reference() :: atom() | {atom(), atom()} | {global, term()} | pid().
 -type request_handler() :: {list(binary()), atom()}.
@@ -140,48 +121,45 @@ transform_listen_option(Opt, Opts) ->
 
 init([{SockMod, Socket}, Opts]) ->
 	?DEBUG("INIT WEBSOCKET LISTENER: ~p, ~p", [{SockMod, Socket}, Opts]),
-	TLSEnabled = proplists:get_bool(tls, Opts),
-	TLSOpts1 = [Opt || {certfile, _} = Opt <- Opts],
-	TLSOpts = [verify_none | TLSOpts1],
+	SslEnabled = proplists:get_bool(tls, Opts),
+	SslOpts1 = [Opt || {certfile, _} = Opt <- Opts],
+	SslOpts = [{verify, verify_none} | SslOpts1],
 
-	{SockMod1, Socket1} = case TLSEnabled of
-		true ->
-			inet:setopts(Socket, [{recbuf, 8192}]),
-			{ok, TLSSocket} = tls:tcp_to_tls(Socket, TLSOpts),
-			{tls, TLSSocket};
-		false ->
-			{SockMod, Socket}
+	setopts(SockMod, Socket, [{recbuf, 8192}]),
+	case SslEnabled of
+		true -> gen_fsm:send_event(self(), {setup, {ssl, SslOpts}});
+		false -> gen_fsm:send_event(self(), {setup, tcp})
 	end,
-
-	case SockMod1 of
-		gen_tcp ->
-			inet:setopts(Socket1, [{packet, http}, {recbuf, 8192}]);
-		_ ->
-			skip
-	end,
-
-	inet:setopts(Socket1, [{active, once}]),
+	?DEBUG("Checked SslEnabled", []),
 
 	RequestHandlers = case lists:keysearch(request_handlers, 1, Opts) of
 		{value, {request_handlers, H}} -> H;
 		false -> []
 	end,
 
-	?INFO_MSG("started: ~p", [{SockMod1, Socket1}]),
-	State = #ws_state{sockmod = SockMod1,
-		socket = Socket1,
+	?INFO_MSG("started: ~p", [{SockMod, Socket}]),
+	State = #ws_state{sockmod = SockMod,
+		socket = Socket,
 		request_handlers = RequestHandlers},
-	{ok, ws_handshake_request, State}.
+	{ok, ws_setup, State}.
 
 terminate(Reason, StateName, _State) ->
 	?DEBUG("~p:terminate(~p, ~p, map)", [?MODULE, Reason, StateName]),
 	ok.
 
 % TODO: add tls support
-handle_info({_Type, Socket, Data}, StateName, #ws_state{
+handle_info({_Type, _Sock, RawData}, StateName, #ws_state{
+		sockmod = SockMod,
+		socket = Socket,
 		parsing_state = ParsingState,
 		receiving_frames = ReceivingFrames
 	} = State) ->
+	Data = case SockMod of
+		gen_tcp -> RawData;
+		p1_tls -> RawData;
+		ssl -> RawData
+			%{Packets, Rest} = parse_request(State, RawData)
+	end,
 	?DEBUG("Recieved raw data: ~p", [Data]),
 	SwitchToRaw = case Data of
 		http_eoh -> [{packet, raw}];
@@ -206,15 +184,46 @@ handle_info({_Type, Socket, Data}, StateName, #ws_state{
 			State#ws_state{parsing_state = NewParsingState}
 	end,
 
-	inet:setopts(Socket, [{active, once} | SwitchToRaw]),
+	setopts(SockMod, Socket, [{active, once} | SwitchToRaw]),
 	{next_state, StateName, NewState};
 
 % TODO: proper tcp_closed handling
 handle_info({tcp_closed, _Socket}, _StateName, State) ->
-	{stop, {error, "Client closed tcp connection unexpectedly"}, State}.
+	{stop, {error, "Client closed tcp connection unexpectedly"}, State};
+
+handle_info({ssl_closed, _Socket}, _StateName, State) ->
+	{stop, {error, "Client closed ssl connection unexpectedly"}, State};
+
+handle_info(Message, StateName, State) ->
+	?WARNING_MSG("~p:handle_info: unexpected message recieved in state ~p: ~p", [?MODULE, StateName, Message]),
+	{stop, {error, {unexpected_message, Message, StateName}}, State}.
+
+
+ws_setup({setup, tcp}, #ws_state{
+		sockmod = SockMod,
+		socket = Socket
+	} = State) ->
+	?DEBUG("WS_SETUP: tcp", []),
+	setopts(SockMod, Socket, [{packet, http}, {active, once}]),
+	?DEBUG("WS_SETUP: opts set", []),
+	{next_state, ws_handshake_request, State};
+
+ws_setup({setup, {ssl, Opts}}, #ws_state{
+		sockmod = gen_tcp,
+		socket = Socket
+	} = State) ->
+	?DEBUG("WS_SETUP: ssl, ~p", [Opts]),
+	{ok, SSLSocket} = ssl:ssl_accept(Socket, Opts),
+	?DEBUG("WS_SETUP: accepted", []),
+	setopts(ssl, SSLSocket, [{packet, http}, {active, once}]),
+	?DEBUG("WS_SETUP: opts set", []),
+	{next_state, ws_handshake_request, State#ws_state{
+			sockmod = ssl,
+			socket = SSLSocket
+		}}.
+
 
 % TODO: add tcp_error handling
-
 ws_handshake_request(
 		{recv, {http_request, Method, Uri, Version}},
 		#ws_state{} = State) ->
@@ -440,6 +449,14 @@ ws_closing({recv, #ws_frame{opcode = ?WS_OPCODE_CLOSE}}, #ws_state{
 % Internal functions
 %-------------------------------------------------------------------------------
 
+-spec setopts(atom(), inet:socket(), [{atom(), term()}]) -> ok | {error, any()}.
+setopts(SockMod, Socket, Opts) ->
+	?DEBUG("setopts(~p, ~p, ~p)", [SockMod, Socket, Opts]),
+	case SockMod of
+		gen_tcp -> inet:setopts(Socket, Opts);
+		_ -> SockMod:setopts(Socket, Opts)
+	end.
+
 % TODO: handle SockMod:send errors
 -spec send_frame(atom(), term(), websocket_frame:frame()) -> ok.
 send_frame(SockMod, Socket, Frame) ->
@@ -485,38 +502,6 @@ to_normalized_path(PList) when is_list(PList) ->
 to_normalized_path(PBin) when is_binary(PBin) ->
 	RawPath = binary:split(PBin, <<$/>>, [global]),
 	[P || P <- RawPath, byte_size(P) > 0].
-
- % case State#state.sockmod of
-		%_ ->
-			%case Data of
-				%{ok, Binary} ->
-					%?DEBUG("not gen_tcp, ssl? ~p~n", [Binary]),
-					%{Request, Trail} = parse_request(
-						%State,
-						%State#state.trail ++
-						%binary_to_list(Binary)),
-					%State1 = State#state{trail = Trail},
-					%NewState = lists:foldl(
-						%fun(D, S) ->
-								%case S#state.end_of_request of
-									%true ->
-										%S;
-									%_ ->
-										%process_header(S, D)
-								%end
-						%end, State1, Request),
-					%case NewState#state.end_of_request of
-						%true ->
-							%ok;
-						%_ ->
-							%receive_headers(NewState)
-					%end;
-				%Req ->
-					%?DEBUG("not gen_tcp or ok: ~p~n", [Req]),
-					%ok
-			%end
-	%end.
-
 
 find_request_handler([], _) ->
 	undefined;
@@ -637,235 +622,3 @@ old_hex_to_integer(Hex) ->
 		(H) when H >= $0, H =< $9 -> H - $0
 	end,
 	lists:foldl(fun(E, Acc) -> Acc*16+DEHEX(E) end, 0, Hex).
-
-% The following code is mostly taken from yaws_ssl.erl
-parse_request(State, Data) ->
-	case Data of
-		[] ->
-			{[], []};
-		_ ->
-			?DEBUG("GOT ssl data ~p~n", [Data]),
-			{R, Trail} = case State#state.request_method of
-				undefined ->
-					{R1, Trail1} = get_req(Data),
-					?DEBUG("Parsed request ~p~n", [R1]),
-					{[R1], Trail1};
-				_ ->
-					{[], Data}
-			end,
-			{H, Trail2} = get_headers(Trail),
-			{R ++ H, Trail2}
-	end.
-
-
-get_req("\r\n\r\n" ++ _) ->
-	bad_request;
-get_req("\r\n" ++ Data) ->
-	get_req(Data);
-get_req(Data) ->
-	{FirstLine, Trail} = lists:splitwith(fun not_eol/1, Data),
-	R = parse_req(FirstLine),
-	{R, Trail}.
-
-
-not_eol($\r)->
-	false;
-not_eol($\n) ->
-	false;
-not_eol(_) ->
-	true.
-
-
-get_word(Line)->
-	{Word, T} = lists:splitwith(fun(X)-> X /= $\  end, Line),
-	{Word, lists:dropwhile(fun(X) -> X == $\  end, T)}.
-
-
-parse_req(Line) ->
-	{MethodStr, L1} = get_word(Line),
-	?DEBUG("Method: ~p~n", [MethodStr]),
-	case L1 of
-		[] ->
-			bad_request;
-		_ ->
-			{URI, L2} = get_word(L1),
-			{VersionStr, L3} = get_word(L2),
-			?DEBUG("URI: ~p~nVersion: ~p~nL3: ~p~n",
-				[URI, VersionStr, L3]),
-			case L3 of
-				[] ->
-					Method = case MethodStr of
-						"GET" -> 'GET';
-						"POST" -> 'POST';
-						"HEAD" -> 'HEAD';
-						"OPTIONS" -> 'OPTIONS';
-						"TRACE" -> 'TRACE';
-						"PUT" -> 'PUT';
-						"DELETE" -> 'DELETE';
-						S -> S
-					end,
-					Path = case URI of
-						"*" ->
-							% Is this correct?
-							"*";
-						_ ->
-							case string:str(URI, "://") of
-								0 ->
-									% Relative URI
-									% ex: /index.html
-									{abs_path, URI};
-								N ->
-									% Absolute URI
-									% ex: http://localhost/index.html
-
-									% Remove scheme
-									% ex: URI2 = localhost/index.html
-									URI2 = string:substr(URI, N + 3),
-									% Look for the start of the path
-									% (or the lack of a path thereof)
-									case string:chr(URI2, $/) of
-										0 -> {abs_path, "/"};
-										M -> {abs_path,
-												string:substr(URI2, M + 1)}
-									end
-							end
-					end,
-					case VersionStr of
-						[] ->
-							{ok, {http_request, Method, Path, {0,9}}};
-						"HTTP/1.0" ->
-							{ok, {http_request, Method, Path, {1,0}}};
-						"HTTP/1.1" ->
-							{ok, {http_request, Method, Path, {1,1}}};
-						_ ->
-							bad_request
-					end;
-				_ ->
-					bad_request
-			end
-	end.
-
-
-get_headers(Tail) ->
-	get_headers([], Tail).
-
-get_headers(H, Tail) ->
-	case get_line(Tail) of
-		{incomplete, Tail2} ->
-			{H, Tail2};
-		{line, Line, Tail2} ->
-			get_headers(H ++ parse_line(Line), Tail2);
-		{lastline, Line, Tail2} ->
-			{H ++ parse_line(Line) ++ [{ok, http_eoh}], Tail2}
-	end.
-
-
-parse_line("Connection:" ++ Con) ->
-	[{ok, {http_header,  undefined, 'Connection', undefined, strip_spaces(Con)}}];
-parse_line("Host:" ++ Con) ->
-	[{ok, {http_header,  undefined, 'Host', undefined, strip_spaces(Con)}}];
-parse_line("Accept:" ++ Con) ->
-	[{ok, {http_header,  undefined, 'Accept', undefined, strip_spaces(Con)}}];
-parse_line("If-Modified-Since:" ++ Con) ->
-	[{ok, {http_header,  undefined, 'If-Modified-Since', undefined, strip_spaces(Con)}}];
-parse_line("If-Match:" ++ Con) ->
-	[{ok, {http_header,  undefined, 'If-Match', undefined, strip_spaces(Con)}}];
-parse_line("If-None-Match:" ++ Con) ->
-	[{ok, {http_header,  undefined, 'If-None-Match', undefined, strip_spaces(Con)}}];
-parse_line("If-Range:" ++ Con) ->
-	[{ok, {http_header,  undefined, 'If-Range', undefined, strip_spaces(Con)}}];
-parse_line("If-Unmodified-Since:" ++ Con) ->
-	[{ok, {http_header,  undefined, 'If-Unmodified-Since', undefined, strip_spaces(Con)}}];
-parse_line("Range:" ++ Con) ->
-	[{ok, {http_header,  undefined, 'Range', undefined, strip_spaces(Con)}}];
-parse_line("User-Agent:" ++ Con) ->
-	[{ok, {http_header,  undefined, 'User-Agent', undefined, strip_spaces(Con)}}];
-parse_line("Accept-Ranges:" ++ Con) ->
-	[{ok, {http_header,  undefined, 'Accept-Ranges', undefined, strip_spaces(Con)}}];
-parse_line("Authorization:" ++ Con) ->
-	[{ok, {http_header,  undefined, 'Authorization', undefined, strip_spaces(Con)}}];
-parse_line("Keep-Alive:" ++ Con) ->
-	[{ok, {http_header,  undefined, 'Keep-Alive', undefined, strip_spaces(Con)}}];
-parse_line("Referer:" ++ Con) ->
-	[{ok, {http_header,  undefined, 'Referer', undefined, strip_spaces(Con)}}];
-parse_line("Content-type:"++Con) ->
-	[{ok, {http_header,  undefined, 'Content-Type', undefined, strip_spaces(Con)}}];
-parse_line("Content-Type:"++Con) ->
-	[{ok, {http_header,  undefined, 'Content-Type', undefined, strip_spaces(Con)}}];
-parse_line("Content-Length:"++Con) ->
-	[{ok, {http_header,  undefined, 'Content-Length', undefined, strip_spaces(Con)}}];
-parse_line("Content-length:"++Con) ->
-	[{ok, {http_header,  undefined, 'Content-Length', undefined, strip_spaces(Con)}}];
-parse_line("Cookie:"++Con) ->
-	[{ok, {http_header,  undefined, 'Cookie', undefined, strip_spaces(Con)}}];
-parse_line("Accept-Language:"++Con) ->
-	[{ok, {http_header,  undefined, 'Accept-Language', undefined, strip_spaces(Con)}}];
-parse_line("Accept-Encoding:"++Con) ->
-	[{ok, {http_header,  undefined, 'Accept-Encoding', undefined, strip_spaces(Con)}}];
-parse_line(S) ->
-	case lists:splitwith(fun(C)->C /= $: end, S) of
-		{Name, [$:|Val]} ->
-			[{ok, {http_header,  undefined, Name, undefined, strip_spaces(Val)}}];
-		_ ->
-			[]
-	end.
-
-
-is_space($\s) ->
-	true;
-is_space($\r) ->
-	true;
-is_space($\n) ->
-	true;
-is_space($\t) ->
-	true;
-is_space(_) ->
-	false.
-
-
-strip_spaces(String) ->
-	strip_spaces(String, both).
-
-strip_spaces(String, left) ->
-	drop_spaces(String);
-strip_spaces(String, right) ->
-	lists:reverse(drop_spaces(lists:reverse(String)));
-strip_spaces(String, both) ->
-	strip_spaces(drop_spaces(String), right).
-
-
-drop_spaces([]) ->
-	[];
-drop_spaces(YS=[X|XS]) ->
-	case is_space(X) of
-		true ->
-			drop_spaces(XS);
-		false ->
-			YS
-	end.
-
-
-is_nb_space(X) ->
-	lists:member(X, [$\s, $\t]).
-
-
-% ret: {line, Line, Trail} | {lastline, Line, Trail}
-
-get_line(L) ->
-	get_line(L, []).
-get_line("\r\n\r\n" ++ Tail, Cur) ->
-	{lastline, lists:reverse(Cur), Tail};
-get_line("\r\n" ++ Tail, Cur) ->
-	case Tail of
-		[] ->
-			{incomplete, lists:reverse(Cur) ++ "\r\n"};
-		_ ->
-			case is_nb_space(hd(Tail)) of
-				true ->  %% multiline ... continue
-		get_line(Tail, [$\n, $\r | Cur]);
-	false ->
-		{line, lists:reverse(Cur), Tail}
-end
-		end;
-	get_line([H|T], Cur) ->
-		get_line(T, [H|Cur]).
