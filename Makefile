@@ -1,4 +1,4 @@
-DESTDIR=/usr
+DESTDIR=/
 
 EBIN_DIR=${DESTDIR}/lib/ejabberd/ebin
 INCLUDE_DIR=${DESTDIR}/lib/ejabberd/include
