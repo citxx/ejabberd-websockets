@@ -46,7 +46,6 @@
 -include("logger.hrl").
 -include("jlib.hrl").
 -include("websocket_frame.hrl").
--include("websocket_session.hrl").
 
 
 -type process_reference() :: atom() | {atom(), atom()} | {global, term()} | pid().
@@ -120,7 +119,7 @@ transform_listen_option(Opt, Opts) ->
 %-------------------------------------------------------------------------------
 
 init([{SockMod, Socket}, Opts]) ->
-	?DEBUG("INIT WEBSOCKET LISTENER: ~p, ~p", [{SockMod, Socket}, Opts]),
+	?DEBUG("Start WebSocket connection ~p via ~p with options: ~p", [self(), SockMod, Opts]),
 	SslEnabled = proplists:get_bool(tls, Opts),
 	SslOpts1 = [Opt || {certfile, _} = Opt <- Opts],
 	SslOpts = [{verify, verify_none} | SslOpts1],
@@ -130,21 +129,19 @@ init([{SockMod, Socket}, Opts]) ->
 		true -> gen_fsm:send_event(self(), {setup, {ssl, SslOpts}});
 		false -> gen_fsm:send_event(self(), {setup, tcp})
 	end,
-	?DEBUG("Checked SslEnabled", []),
 
 	RequestHandlers = case lists:keysearch(request_handlers, 1, Opts) of
 		{value, {request_handlers, H}} -> H;
 		false -> []
 	end,
 
-	?INFO_MSG("started: ~p", [{SockMod, Socket}]),
 	State = #ws_state{sockmod = SockMod,
 		socket = Socket,
 		request_handlers = RequestHandlers},
 	{ok, ws_setup, State}.
 
 terminate(Reason, StateName, _State) ->
-	?DEBUG("~p:terminate(~p, ~p, map)", [?MODULE, Reason, StateName]),
+	?DEBUG("Stop WebSocket connection ~p because of ~p", [self(), Reason]),
 	ok.
 
 handle_info({_Type, _Sock, Data}, StateName, #ws_state{
@@ -153,7 +150,7 @@ handle_info({_Type, _Sock, Data}, StateName, #ws_state{
 		parsing_state = ParsingState,
 		receiving_frames = ReceivingFrames
 	} = State) ->
-	?DEBUG("Recieved raw data: ~p", [Data]),
+	?DEBUG("Recieved raw data from WebSocket: ~p", [Data]),
 	SwitchToRaw = case Data of
 		http_eoh -> [{packet, raw}];
 		_ -> []
@@ -196,20 +193,16 @@ ws_setup({setup, tcp}, #ws_state{
 		sockmod = SockMod,
 		socket = Socket
 	} = State) ->
-	?DEBUG("WS_SETUP: tcp", []),
 	setopts(SockMod, Socket, [{packet, http}, {active, once}]),
-	?DEBUG("WS_SETUP: opts set", []),
 	{next_state, ws_handshake_request, State};
 
 ws_setup({setup, {ssl, Opts}}, #ws_state{
 		sockmod = gen_tcp,
 		socket = Socket
 	} = State) ->
-	?DEBUG("WS_SETUP: ssl, ~p", [Opts]),
 	{ok, SSLSocket} = ssl:ssl_accept(Socket, Opts),
-	?DEBUG("WS_SETUP: accepted", []),
+	?DEBUG("Upgrade WebSocket connection ~p to ssl", [self()]),
 	setopts(ssl, SSLSocket, [{packet, http}, {active, once}]),
-	?DEBUG("WS_SETUP: opts set", []),
 	{next_state, ws_handshake_request, State#ws_state{
 			sockmod = ssl,
 			socket = SSLSocket
@@ -271,7 +264,6 @@ ws_handshake_header({recv, http_eoh}, #ws_state{
 	Upgrade = [jlib:tolower(X) || X <- maps:get(<<"upgrade">>, Headers, [])],
 	Connection = [jlib:tolower(X) || X <- maps:get(<<"connection">>, Headers, [])],
 	SecWebSocketKey = maps:get(<<"sec-websocket-key">>, Headers, []),
-	?DEBUG("SecWebSocketKey = ~p of ~p", [SecWebSocketKey, 1]),
 	SecWebSocketVersion = maps:get(<<"sec-websocket-version">>, Headers, []),
 	SecWebSocketProtocol = maps:get(<<"sec-websocket-protocol">>, Headers, []),
 	

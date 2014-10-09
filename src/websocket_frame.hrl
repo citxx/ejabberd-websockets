@@ -1,5 +1,5 @@
 -record(ws_frame, {
-		fin = undefined :: undefined | boolean(),
+		fin = undefined :: undefined | 0..1,
 		rsv1 = undefined :: undefined | 0..1,
 		rsv2 = undefined :: undefined | 0..1,
 		rsv3 = undefined :: undefined | 0..1,

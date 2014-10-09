@@ -20,7 +20,6 @@
 -include("ejabberd.hrl").
 -include("logger.hrl").
 -include("jlib.hrl").
--include("websocket_session.hrl").
 
 
 start(Host, _Opts) ->
