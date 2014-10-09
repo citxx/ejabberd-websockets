@@ -147,19 +147,12 @@ terminate(Reason, StateName, _State) ->
 	?DEBUG("~p:terminate(~p, ~p, map)", [?MODULE, Reason, StateName]),
 	ok.
 
-% TODO: add tls support
-handle_info({_Type, _Sock, RawData}, StateName, #ws_state{
+handle_info({_Type, _Sock, Data}, StateName, #ws_state{
 		sockmod = SockMod,
 		socket = Socket,
 		parsing_state = ParsingState,
 		receiving_frames = ReceivingFrames
 	} = State) ->
-	Data = case SockMod of
-		gen_tcp -> RawData;
-		p1_tls -> RawData;
-		ssl -> RawData
-			%{Packets, Rest} = parse_request(State, RawData)
-	end,
 	?DEBUG("Recieved raw data: ~p", [Data]),
 	SwitchToRaw = case Data of
 		http_eoh -> [{packet, raw}];
@@ -457,12 +450,15 @@ setopts(SockMod, Socket, Opts) ->
 		_ -> SockMod:setopts(Socket, Opts)
 	end.
 
-% TODO: handle SockMod:send errors
--spec send_frame(atom(), term(), websocket_frame:frame()) -> ok.
+-spec send_frame(atom(), term(), websocket_frame:frame()) -> ok | {error, any()}.
 send_frame(SockMod, Socket, Frame) ->
 	FrameBin = websocket_frame:to_binary(Frame),
-	SockMod:send(Socket, FrameBin),
-	ok.
+	Result = SockMod:send(Socket, FrameBin),
+	case Result of
+		ok -> skip;
+		{error, Reason} -> ?WARNING_MSG("Can't send fame ~p to websocket because of ~p", [Frame, Reason])
+	end,
+	Result.
 
 -spec add_header(atom() | iodata(), iodata(), map()) -> map().
 add_header(Name, Value, HeadersMap) ->
