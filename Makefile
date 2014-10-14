@@ -7,8 +7,8 @@ APPLICATION_DEPS=erts kernel stdlib crypto public_key ssl mnesia sasl asn1 compi
 
 DIALYZER_FLAGS=-Wrace_conditions -Werror_handling
 
-EBIN_DIR=${DESTDIR}/lib/ejabberd/ebin
-INCLUDE_DIR=${DESTDIR}/lib/ejabberd/include
+EBIN_DIR=${DESTDIR}/usr/lib/ejabberd/ebin
+INCLUDE_DIR=${DESTDIR}/usr/lib/ejabberd/include
 
 
 .PHONY: compile install get-deps update-deps dialyzer clean
@@ -46,7 +46,7 @@ update-deps:
 dialyzer: $(DEPS_PLT)
 	dialyzer --fullpath --plt $(DEPS_PLT) $(DIALYZER_FLAGS) -r ./ebin
 	
-$(DEPS_PLT): get-deps
+$(DEPS_PLT): get-deps compile
 	@echo Building local plt at $(DEPS_PLT)
 	@echo
 	dialyzer --output_plt $(DEPS_PLT) --apps $(APPLICATION_DEPS) --build_plt -r deps/*/ebin/
