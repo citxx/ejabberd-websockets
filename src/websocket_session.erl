@@ -208,8 +208,12 @@ ws_setup({setup, {ssl, Opts}}, #ws_state{
 					sockmod = ssl,
 					socket = SSLSocket
 				}};
+		{error, closed} ->
+			{stop, normal, State};
+		{error, not_owner} ->
+			{stop, normal, State};
 		Error ->
-			?ERROR_MSG("Error while upgrading WebSocket connection ~p to ssl: ~p", [self(), Error]),
+			?ERROR_MSG("Error while upgrading WebSocket connection ~p to ssl: ~p", [{self(), inet:peername(Socket)}, Error]),
 			gen_tcp:close(Socket),
 			{stop, {error, Error}, State}
 	end.
