@@ -20,12 +20,14 @@
 -include("ejabberd.hrl").
 -include("logger.hrl").
 -include("jlib.hrl").
--include("websocket_session.hrl").
 
 
 start(Host, _Opts) ->
 		?WARNING_MSG("~p loaded on ~s", [?MODULE, Host]),
-		ssl:start(),
+		case lists:keyfind(ssl, 1, application:which_applications()) of
+			false -> ssl:start();
+			_ -> skip
+		end,
     Proc = gen_mod:get_module_proc(Host, ?PROCNAME_MHB),
     ChildSpec =
         {Proc,

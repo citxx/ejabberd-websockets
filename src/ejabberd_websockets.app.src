@@ -3,5 +3,5 @@
   {description, "Implementation of XMPP over WebSocket protocol for ejabberd"},
   {vsn, "1.0_alpha"},
   {registered, []},
-  {applications, [kernel, stdlib]}
+  {applications, [kernel, stdlib, ssl]}
  ]}.

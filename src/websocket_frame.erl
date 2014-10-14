@@ -140,7 +140,7 @@ to_binary(#ws_frame{
 	end,
 	WithMaskingKey = case Mask of
 		0 -> WithLength;
-		1 -> <<WithLength/binary, MaskingKey:32>>
+		1 -> <<WithLength/binary, MaskingKey/binary>>
 	end,
 	FrameData = case Mask of
 		0 -> PayloadData;
