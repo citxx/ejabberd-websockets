@@ -17,9 +17,6 @@ INCLUDE_DIR=${DESTDIR}/lib/ejabberd/include
 default: compile
 
 compile: get-deps src/* rebar.config rebar
-	$(REBAR) skip_deps=true compile
-
-compile-all: get-deps src/* rebar.config rebar
 	$(REBAR) compile
 
 install:
@@ -49,7 +46,7 @@ update-deps:
 dialyzer: $(DEPS_PLT)
 	dialyzer --fullpath --plt $(DEPS_PLT) $(DIALYZER_FLAGS) -r ./ebin
 	
-$(DEPS_PLT): get-deps compile-all
+$(DEPS_PLT): get-deps
 	@echo Building local plt at $(DEPS_PLT)
 	@echo
 	dialyzer --output_plt $(DEPS_PLT) --apps $(APPLICATION_DEPS) --build_plt -r deps/*/ebin/
