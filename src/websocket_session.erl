@@ -141,7 +141,7 @@ init([{SockMod, Socket}, Opts]) ->
 	{ok, ws_setup, State}.
 
 terminate(Reason, StateName, _State) ->
-	?DEBUG("Stop WebSocket connection ~p because of ~p", [self(), Reason]),
+	?DEBUG("Stop WebSocket connection ~p in state ~p because of ~p", [self(), StateName, Reason]),
 	ok.
 
 handle_info({_Type, _Sock, Data}, StateName, #ws_state{
@@ -200,13 +200,19 @@ ws_setup({setup, {ssl, Opts}}, #ws_state{
 		sockmod = gen_tcp,
 		socket = Socket
 	} = State) ->
-	{ok, SSLSocket} = ssl:ssl_accept(Socket, Opts),
-	?DEBUG("Upgrade WebSocket connection ~p to ssl", [self()]),
-	setopts(ssl, SSLSocket, [{packet, http}, {active, once}]),
-	{next_state, ws_handshake_request, State#ws_state{
-			sockmod = ssl,
-			socket = SSLSocket
-		}}.
+	case ssl:ssl_accept(Socket, Opts) of
+		{ok, SSLSocket} ->
+			?DEBUG("Upgrade WebSocket connection ~p to ssl", [self()]),
+			setopts(ssl, SSLSocket, [{packet, http}, {active, once}]),
+			{next_state, ws_handshake_request, State#ws_state{
+					sockmod = ssl,
+					socket = SSLSocket
+				}};
+		Error ->
+			?ERROR_MSG("Error while upgrading WebSocket connection ~p to ssl: ~p", [self(), Error]),
+			ssl:close(Socket),
+			{stop, {error, Error}, State}
+	end.
 
 
 % TODO: add tcp_error handling
