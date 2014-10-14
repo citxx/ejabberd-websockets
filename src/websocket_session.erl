@@ -210,7 +210,7 @@ ws_setup({setup, {ssl, Opts}}, #ws_state{
 				}};
 		Error ->
 			?ERROR_MSG("Error while upgrading WebSocket connection ~p to ssl: ~p", [self(), Error]),
-			ssl:close(Socket),
+			gen_tcp:close(Socket),
 			{stop, {error, Error}, State}
 	end.
 
