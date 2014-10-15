@@ -20,8 +20,8 @@
 	to_binary/1
 ]).
 
--export_types([
-		ws_parsing_state/0,
+-export_type([
+		parsing_state/0,
 		frame/0
 	]).
 

@@ -58,7 +58,7 @@
 		request_handlers = [] :: list(request_handler()),
 		request_method = undefined :: undefined | atom() | binary(),
 		request_version = undefined :: undefined | {integer(), integer()},
-		request_path = undefined :: undefined | {abs_path, binary()} | binary(),
+		request_path = undefined :: undefined | [binary()],
 		request_headers = #{} :: map(),
 		parsing_state = websocket_frame:new_parsing_state() ::
 			websocket_frame:parsing_state(),
@@ -224,9 +224,11 @@ ws_handshake_request(
 		{recv, {http_request, Method, Uri, Version}},
 		#ws_state{} = State) ->
 	% TODO: error handling
-	{abs_path, RawPath} = case Uri of
-		{absoluteURI, _Scheme, _Host, _Port, P} -> {abs_path, P};
-		_ -> Uri
+	RawPath = case Uri of
+		{absoluteURI, _Scheme, _Host, _Port, P} -> P;
+		{scheme, _Scheme, P} -> P;
+		{abs_path, P} -> P;
+		P -> P
 	end,
 	Path = case (catch url_decode_q_split(RawPath)) of 
 		{'EXIT', _} -> undefined;
@@ -444,7 +446,7 @@ ws_closing({recv, #ws_frame{opcode = ?WS_OPCODE_CLOSE}}, #ws_state{
 % Internal functions
 %-------------------------------------------------------------------------------
 
--spec setopts(atom(), inet:socket(), [{atom(), term()}]) -> ok | {error, any()}.
+-spec setopts(atom(), term(), [{atom(), term()}]) -> ok | {error, term()}.
 setopts(SockMod, Socket, Opts) ->
 	?DEBUG("setopts(~p, ~p, ~p)", [SockMod, Socket, Opts]),
 	case SockMod of
@@ -452,7 +454,7 @@ setopts(SockMod, Socket, Opts) ->
 		_ -> SockMod:setopts(Socket, Opts)
 	end.
 
--spec send_frame(atom(), term(), websocket_frame:frame()) -> ok | {error, any()}.
+-spec send_frame(atom(), term(), websocket_frame:frame()) -> ok | {error, term()}.
 send_frame(SockMod, Socket, Frame) ->
 	FrameBin = websocket_frame:to_binary(Frame),
 	Result = SockMod:send(Socket, FrameBin),
@@ -489,7 +491,7 @@ build_http_response({VMaj, VMin}, Code, Message, Headers) ->
 	?DEBUG("Sending response:~n~s", [Response]),
 	Response.
 
--spec to_normalized_path(iolist()) -> binary().
+-spec to_normalized_path(iodata()) -> [binary()].
 to_normalized_path(PList) when is_list(PList) ->
 	case lists:all(fun is_integer/1, PList) of
 		true ->  % String
@@ -501,6 +503,7 @@ to_normalized_path(PBin) when is_binary(PBin) ->
 	RawPath = binary:split(PBin, <<$/>>, [global]),
 	[P || P <- RawPath, byte_size(P) > 0].
 
+-spec find_request_handler([{[binary()], atom()}], [binary()]) -> undefined | {atom(), [binary()]}.
 find_request_handler([], _) ->
 	undefined;
 find_request_handler([{HandlerPathPrefix, HandlerModule} | HandlersLeft], Path) ->
@@ -529,8 +532,7 @@ analyze_ip_xff(IP, [], _Host) ->
 	IP;
 analyze_ip_xff({IPLast, Port}, XFF, Host) ->
 	[ClientIP | ProxiesIPs] = XFF ++ [inet_parse:ntoa(IPLast)],
-	TrustedProxies = case ejabberd_config:get_local_option(
-			{trusted_proxies, Host}) of
+	TrustedProxies = case ejabberd_config:get_local_option({trusted_proxies, Host}, fun(X) -> X end) of
 		undefined -> [];
 		TPs -> TPs
 	end,

@@ -31,6 +31,7 @@
 
 -include("ejabberd.hrl").
 -include("logger.hrl").
+-include("xml.hrl").
 
 %% Module constants
 -define(NULL_PEER, {{0, 0, 0, 0}, 0}).
@@ -208,30 +209,30 @@ init([Sid, Key, IP, WsSessionRef]) ->
 %%          {stop, Reason, NewStateData}
 %%----------------------------------------------------------------------
 handle_event({become_controller, C2SPid}, StateName, StateData) ->
-    ?DEBUG("C2SPid:~p~nStateName:~p~nData:~p~n",
-           [C2SPid, StateName, StateData#state.input]),
-    case StateData#state.input of
-	cancel ->
-	    {next_state, StateName, StateData#state{
-				      waiting_input = C2SPid}};
-	Input ->
-	    lists:foreach(
-	      fun([]) ->
-                      %% skip
-                      ?DEBUG("Empty input queue.",[]);
-                 (Event) ->
-                      C2SPid ! Event
-	      end, queue:to_list(Input)),
-	    {next_state, StateName, StateData#state{
-				      input = queue:new(),
-				      waiting_input = C2SPid}}
-    end;
+	?DEBUG("C2SPid:~p~nStateName:~p~nData:~p~n",
+		[C2SPid, StateName, StateData#state.input]),
+	case StateData#state.input of
+		cancel ->
+			{next_state, StateName, StateData#state{
+					waiting_input = C2SPid}};
+		Input ->
+			lists:foreach(
+				fun([]) ->
+						%% skip
+						?DEBUG("Empty input queue.",[]);
+					(Event) ->
+						C2SPid ! Event
+				end, queue:to_list(Input)),
+			{next_state, StateName, StateData#state{
+					input = queue:new(),
+					waiting_input = C2SPid}}
+	end;
 
 handle_event({change_shaper, Shaper}, StateName, StateData) ->
-    NewShaperState = shaper:new(Shaper),
-    {next_state, StateName, StateData#state{shaper_state = NewShaperState}};
+	NewShaperState = shaper:new(Shaper),
+	{next_state, StateName, StateData#state{shaper_state = NewShaperState}};
 handle_event(_Event, StateName, StateData) ->
-    {next_state, StateName, StateData}.
+	{next_state, StateName, StateData}.
 
 %%----------------------------------------------------------------------
 %% Func: handle_sync_event/4
@@ -329,32 +330,32 @@ code_change(_OldVsn, StateName, StateData, _Extra) ->
 %%----------------------------------------------------------------------
 %% We reached the max_inactivity timeout:
 handle_info({timeout, Timer, _}, _StateName,
-	    #state{id=SID, timer = Timer} = StateData) ->
-    ?INFO_MSG("Session timeout. Closing the websocket session: ~p", [SID]),
-    {stop, normal, StateData};
+	#state{id=SID, timer = Timer} = StateData) ->
+	?INFO_MSG("Session timeout. Closing the websocket session: ~p", [SID]),
+	{stop, normal, StateData};
 
 handle_info({timeout, WaitTimer, _}, StateName,
-	    #state{wait_timer = WaitTimer} = StateData) ->
-    if
-	StateData#state.websocket_receiver /= undefined ->
-	    cancel_timer(StateData#state.timer),
-	    Timer = set_inactivity_timer(StateData#state.pause,
-					 StateData#state.max_inactivity),
-	    gen_fsm:reply(StateData#state.websocket_receiver, {ok, empty}),
-	    {next_state, StateName,
-	     StateData#state{websocket_receiver = undefined,
-			     wait_timer = undefined,
-			     timer = Timer}};
-	true ->
-	    {next_state, StateName, StateData}
-    end;
+	#state{wait_timer = WaitTimer} = StateData) ->
+	if
+		StateData#state.websocket_receiver /= undefined ->
+			cancel_timer(StateData#state.timer),
+			Timer = set_inactivity_timer(StateData#state.pause,
+				StateData#state.max_inactivity),
+			gen_fsm:reply(StateData#state.websocket_receiver, {ok, empty}),
+			{next_state, StateName,
+				StateData#state{websocket_receiver = undefined,
+					wait_timer = undefined,
+					timer = Timer}};
+		true ->
+			{next_state, StateName, StateData}
+	end;
 
 handle_info({timeout, ShaperTimer, _}, StateName,
-	    #state{shaper_timer = ShaperTimer} = StateData) ->
-    {next_state, StateName, StateData#state{shaper_timer = undefined}};
+	#state{shaper_timer = ShaperTimer} = StateData) ->
+	{next_state, StateName, StateData#state{shaper_timer = undefined}};
 
 handle_info(_, StateName, StateData) ->
-    {next_state, StateName, StateData}.
+	{next_state, StateName, StateData}.
 
 %%----------------------------------------------------------------------
 %% Func: terminate/3
@@ -362,35 +363,35 @@ handle_info(_, StateName, StateData) ->
 %% Returns: any
 %%----------------------------------------------------------------------
 terminate(Reason, _StateName, StateData) ->
-    ?DEBUG("terminate: Deleting session ~s~nReason = ~p~n",
-			[StateData#state.id, Reason]),
-    send_receiver_reply(StateData#state.websocket_receiver, {ok, terminate}),
-    case StateData#state.waiting_input of
-	false ->
-	    ok;
-	C2SPid ->
-	    gen_fsm:send_event(C2SPid, closed)
-    end,
-    ok.
+	?DEBUG("terminate: Deleting session ~s~nReason = ~p~n",
+		[StateData#state.id, Reason]),
+	send_receiver_reply(StateData#state.websocket_receiver, {ok, terminate}),
+	case StateData#state.waiting_input of
+		false ->
+			ok;
+		C2SPid ->
+			gen_fsm:send_event(C2SPid, closed)
+	end,
+	ok.
 %%%
 %% Internal functions
 %%%
 stream_start(ParsedPayload) ->
-    ?DEBUG("~p~n",[ParsedPayload]),
-    case ParsedPayload of
-        {xmlelement, "stream:stream", Attrs, _} ->
-            {<<"to">>, Host} = lists:keyfind(<<"to">>, 1, Attrs),
-            Sid = crypto:hash(sha, term_to_binary({now(), make_ref()})),
-            Key = "",
-            {Host, Sid, Key};
-        {xmlstreamstart, _Name, Attrs} ->
-            {<<"to">>, Host} = lists:keyfind(<<"to">>, 1, Attrs),
-            Sid = crypto:hash(sha, term_to_binary({now(), make_ref()})),
-            Key = "",
-            {Host, Sid, Key};
-        _ ->
-            false
-    end.
+	?DEBUG("~p~n",[ParsedPayload]),
+	case ParsedPayload of
+		#xmlel{name = <<"stream:stream">>, attrs = Attrs} ->
+			{<<"to">>, Host} = lists:keyfind(<<"to">>, 1, Attrs),
+			Sid = crypto:hash(sha, term_to_binary({now(), make_ref()})),
+			Key = "",
+			{Host, Sid, Key};
+		{xmlstreamstart, _Name, Attrs} ->
+			{<<"to">>, Host} = lists:keyfind(<<"to">>, 1, Attrs),
+			Sid = crypto:hash(sha, term_to_binary({now(), make_ref()})),
+			Key = "",
+			{Host, Sid, Key};
+		_ ->
+			false
+	end.
 %% validate request sent. ensure that its parsable XMPP
 validate_request(Data, PayloadSize, MaxStanzaSize) ->
 	?DEBUG("--- incoming data --- ~n~s~n --- END --- ", [Data]),
@@ -424,9 +425,9 @@ validate_request(Data, PayloadSize, MaxStanzaSize) ->
 	end.
 
 send_receiver_reply(undefined, _Reply) ->
-    ok;
+	ok;
 send_receiver_reply(Receiver, Reply) ->
-    gen_fsm:reply(Receiver, Reply).
+	gen_fsm:reply(Receiver, Reply).
 
 %% send data to socket
 send_text(StateData, Text) ->
@@ -537,26 +538,26 @@ stream_start_end(Data) when is_binary(Data) ->
 	end.
 
 streamstart_tobinary({xmlstreamstart, Name, Attrs}) ->
-    XmlStrListStart = io_lib:format("<~s",[Name]),
-    RestStr = attrs_tostring("", Attrs),
-    list_to_binary([XmlStrListStart,RestStr,">"]).
+	XmlStrListStart = io_lib:format("<~s",[Name]),
+	RestStr = attrs_tostring("", Attrs),
+	list_to_binary([XmlStrListStart,RestStr,">"]).
 attrs_tostring(String,[]) ->
-    String;
+	String;
 attrs_tostring(Str,[X|Rest]) ->
-    {Name, Value} = X,
-    AttrStr = io_lib:format(" ~s='~s'",[Name, Value]),
-    attrs_tostring([Str,AttrStr], Rest).
+	{Name, Value} = X,
+	AttrStr = io_lib:format(" ~s='~s'",[Name, Value]),
+	attrs_tostring([Str,AttrStr], Rest).
 
 %% Tests
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 stream_start_end_test() ->
-    false = stream_start_end("stream no xml"),
-    {xmlstreamstart, _X, _Y} = stream_start_end("<stream:stream xmlns:stream='http://etherx.jabber.org/streams' xmlns='jabber:client' to='localhost' version='1.0'>"),
-    {xmlstreamend, _Z} = stream_start_end("</stream:stream>").
+	false = stream_start_end("stream no xml"),
+	{xmlstreamstart, _X, _Y} = stream_start_end("<stream:stream xmlns:stream='http://etherx.jabber.org/streams' xmlns='jabber:client' to='localhost' version='1.0'>"),
+	{xmlstreamend, _Z} = stream_start_end("</stream:stream>").
 streamstart_tobinary_test() ->
-    TestStr =     <<"<stream:stream to='localhost' xmlns:stream='http://etherx.jabber.org/streams' xmlns='jabber:client' version='1.0'>">>,
-    io:format("~p~n",[streamstart_tobinary({xmlstreamstart, "stream:stream", [{"to","localhost"}, {"xmlns:stream","http://etherx.jabber.org/streams"}, {"xmlns","jabber:client"}, {"version","1.0"}]})]),
-    io:format("~p~n",[TestStr]),
-    TestStr = streamstart_tobinary({xmlstreamstart, "stream:stream", [{"to","localhost"}, {"xmlns:stream","http://etherx.jabber.org/streams"}, {"xmlns","jabber:client"}, {"version","1.0"}]}).
+	TestStr =     <<"<stream:stream to='localhost' xmlns:stream='http://etherx.jabber.org/streams' xmlns='jabber:client' version='1.0'>">>,
+	io:format("~p~n",[streamstart_tobinary({xmlstreamstart, "stream:stream", [{"to","localhost"}, {"xmlns:stream","http://etherx.jabber.org/streams"}, {"xmlns","jabber:client"}, {"version","1.0"}]})]),
+	io:format("~p~n",[TestStr]),
+	TestStr = streamstart_tobinary({xmlstreamstart, "stream:stream", [{"to","localhost"}, {"xmlns:stream","http://etherx.jabber.org/streams"}, {"xmlns","jabber:client"}, {"version","1.0"}]}).
 -endif.

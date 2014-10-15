@@ -3,6 +3,7 @@ DESTDIR=/
 REBAR=./rebar
 
 DEPS_PLT=$(CURDIR)/.deps_plt
+OTP_PLT=$(CURDIR)/.otp_plt
 APPLICATION_DEPS=erts kernel stdlib crypto public_key ssl mnesia sasl asn1 compiler syntax_tools odbc tools
 
 DIALYZER_FLAGS=-Wrace_conditions -Werror_handling
@@ -43,13 +44,18 @@ update-deps:
 	$(REBAR) update-deps
 	$(REBAR) compile
 
-dialyzer: $(DEPS_PLT)
-	dialyzer --fullpath --plt $(DEPS_PLT) $(DIALYZER_FLAGS) -r ./ebin
+dialyzer: $(OTP_PLT) $(DEPS_PLT)
+	dialyzer --fullpath --plts $(OTP_PLT) $(DEPS_PLT) $(DIALYZER_FLAGS) -r ./ebin
 	
-$(DEPS_PLT): get-deps compile
-	@echo Building local plt at $(DEPS_PLT)
+$(DEPS_PLT): deps/*/ebin/*
+	@echo Building local dependencies plt at $(DEPS_PLT)
 	@echo
-	dialyzer --output_plt $(DEPS_PLT) --apps $(APPLICATION_DEPS) --build_plt -r deps/*/ebin/
+	dialyzer --output_plt $(DEPS_PLT) --build_plt -r deps/*/ebin/
+
+$(OTP_PLT):
+	@echo Building local otp plt at $(OTP_PLT)
+	@echo
+	dialyzer --output_plt $(OTP_PLT) --apps $(APPLICATION_DEPS) --build_plt
 
 
 clean:
