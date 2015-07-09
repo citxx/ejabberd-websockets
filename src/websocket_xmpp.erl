@@ -30,8 +30,21 @@
 	 process_request/6]).
 
 -include("ejabberd.hrl").
--include("logger.hrl").
--include("xml.hrl").
+%-include("xml.hrl").
+
+-record(xmlelement, {
+		name :: string(),
+		attrs = [] :: [{string(), string()}],
+		children = [] :: [xml()]
+	}).
+
+-record(xmlcdata, {
+		data = "" :: string()
+	}).
+
+-type xmlelement() :: #xmlelement{}.
+-type xmlcdata() :: #xmlcdata{}.
+-type xml() :: xmlelement() | xmlcdata().
 
 %% Module constants
 -define(NULL_PEER, {{0, 0, 0, 0}, 0}).
@@ -39,8 +52,8 @@
                                 % idle sessions
 -define(MAX_PAUSE, 120). % may num of sec a client is allowed to pause
                          % the session
--define(NS_CLIENT, <<"jabber:client">>).
--define(NS_STREAM, <<"http://etherx.jabber.org/streams">>).
+-define(NS_CLIENT, "jabber:client").
+-define(NS_STREAM, "http://etherx.jabber.org/streams").
 %%  Erlang Records for state
 -record(wsr, {socket, sockmod, key, out}).
 
@@ -65,6 +78,7 @@
 	}).
 
 start(Host, Sid, Key, IP, WsSessionRef) ->
+	?DEBUG("TRYING TO START ON HOST ~p", [Host]),
     Proc = gen_mod:get_module_proc(Host, ejabberd_mod_websocket),
     case catch supervisor:start_child(Proc, [Sid, Key, IP, WsSessionRef]) of
     	{ok, Pid} -> {ok, Pid};
@@ -143,7 +157,7 @@ process_request(WSockMod, WSock, FsmRef, Data, IP, WsSessionRef) ->
 								#wsr{sockmod=WSockMod,
 									socket=WSock,
 									out=[ParsedPayload]}),
-							{<<"session started">>, <<>>, Pid};
+							{"session started", "", Pid};
 						S ->
 							?ERROR_MSG("Error starting session:~p~n", [S])
 					end;
@@ -155,21 +169,21 @@ process_request(WSockMod, WSock, FsmRef, Data, IP, WsSessionRef) ->
 					send_data(FsmRef, #wsr{sockmod=WSockMod,
 							socket=WSock,
 							out=[ParsedPayload]}),
-					{Data, <<>>, FsmRef};
+					{Data, "", FsmRef};
 				false ->
 					?DEBUG("Stream start 3", []),
 					send_data(FsmRef, #wsr{sockmod=WSockMod,
 							socket=WSock,
 							out=[ParsedPayload]}),
-					{Data, <<>>, FsmRef};
+					{Data, "", FsmRef};
 				_ ->
 					?ERROR_MSG("Stream Start with no FSM reference: ~p~n",
 						[FsmRef]),
-					{Data, <<>>, FsmRef}
+					{Data, "", FsmRef}
 			end;
 		_ ->
 			?DEBUG("Bad Request: ~p~n", [Data]),
-			{<<"bad request">>, <<>>, FsmRef}
+			{"bad request", "", FsmRef}
 	end.
 
 %%%----------------------------------------------------------------------
@@ -288,8 +302,8 @@ handle_sync_event(#wsr{out=Payload, socket=WSocket, sockmod=WSockmod},
 						send_stream_start(C2SPid, Attrs);
 					({xmlstreamstart, "stream:stream", Attrs}) ->
 						send_stream_start(C2SPid, Attrs);
-					(<<" ">>) ->  % Workaround to support blank xmpp pings
-						send_text(StateData, <<" ">>);
+					(" ") ->  % Workaround to support blank xmpp pings
+						send_text(StateData, " ");
 					(El) ->
 						gen_fsm:send_event(
 							C2SPid, {xmlstreamelement, El})
@@ -379,13 +393,13 @@ terminate(Reason, _StateName, StateData) ->
 stream_start(ParsedPayload) ->
 	?DEBUG("~p~n",[ParsedPayload]),
 	case ParsedPayload of
-		#xmlel{name = <<"stream:stream">>, attrs = Attrs} ->
-			{<<"to">>, Host} = lists:keyfind(<<"to">>, 1, Attrs),
+		#xmlelement{name = "stream:stream", attrs = Attrs} ->
+			{"to", Host} = lists:keyfind("to", 1, Attrs),
 			Sid = crypto:hash(sha, term_to_binary({now(), make_ref()})),
 			Key = "",
 			{Host, Sid, Key};
 		{xmlstreamstart, _Name, Attrs} ->
-			{<<"to">>, Host} = lists:keyfind(<<"to">>, 1, Attrs),
+			{"to", Host} = lists:keyfind("to", 1, Attrs),
 			Sid = crypto:hash(sha, term_to_binary({now(), make_ref()})),
 			Key = "",
 			{Host, Sid, Key};
@@ -397,7 +411,7 @@ validate_request(Data, PayloadSize, MaxStanzaSize) ->
 	?DEBUG("--- incoming data --- ~n~s~n --- END --- ", [Data]),
 	case re:run(Data, "^\s*$") of
 		{match, _} ->
-			{ok, <<" ">>};  % Workaround to support blank xmpp pings
+			{ok, " "};  % Workaround to support blank xmpp pings
 		nomatch ->
 			case xml_stream:parse_element(Data) of
 				{error, Reason} ->
@@ -439,38 +453,38 @@ send_text(StateData, Text) ->
 send_element(StateData, {xmlstreamstart, Name, Attrs}) ->
 	XmlString = streamstart_tobinary({xmlstreamstart, Name, Attrs}),
 	send_text(StateData, XmlString);
-send_element(StateData, {xmlstreamend, <<"stream:stream">>}) ->
-	send_text(StateData, <<"</stream:stream>">>);
+send_element(StateData, {xmlstreamend, "stream:stream"}) ->
+	send_text(StateData, "</stream:stream>");
 send_element(StateData, El) ->
 	send_text(StateData, xml:element_to_binary(El)).
 
 send_stream_start(C2SPid, Attrs) ->
-	StreamTo = case lists:keyfind(<<"to">>, 1, Attrs) of
-		{<<"to">>, Ato} ->
-			case lists:keyfind(<<"version">>,
+	StreamTo = case lists:keyfind("to", 1, Attrs) of
+		{"to", Ato} ->
+			case lists:keyfind("version",
 					1, Attrs) of
-				{<<"version">>, AVersion} ->
+				{"version", AVersion} ->
 					{Ato, AVersion};
 				_ ->
-					{Ato, <<>>}
+					{Ato, ""}
 			end
 	end,
 	case StreamTo of
-		{To, <<>>} ->
+		{To, ""} ->
 			gen_fsm:send_event(
 				C2SPid,
-				{xmlstreamstart, <<"stream:stream">>,
-					[{<<"to">>, To},
-						{<<"xmlns">>, ?NS_CLIENT},
-						{<<"xmlns:stream">>, ?NS_STREAM}]});
+				{xmlstreamstart, "stream:stream",
+					[{"to", To},
+						{"xmlns", ?NS_CLIENT},
+						{"xmlns:stream", ?NS_STREAM}]});
 		{To, Version} ->
 			gen_fsm:send_event(
 				C2SPid,
-				{xmlstreamstart, <<"stream:stream">>,
-					[{<<"to">>, To},
-						{<<"xmlns">>, ?NS_CLIENT},
-						{<<"version">>, Version},
-						{<<"xmlns:stream">>, ?NS_STREAM}]})
+				{xmlstreamstart, "stream:stream",
+					[{"to", To},
+						{"xmlns", ?NS_CLIENT},
+						{"version", Version},
+						{"xmlns:stream", ?NS_STREAM}]})
 	end.
 send_data(FsmRef, Req) ->
 	?DEBUG("session pid:~p~n", [FsmRef]),
@@ -502,7 +516,7 @@ set_inactivity_timer(Pause, _MaxInactivity) when Pause > 0 ->
 set_inactivity_timer(_Pause, MaxInactivity) ->
 	erlang:start_timer(MaxInactivity, self(), []).
 
-stream_start_end(Data) when is_binary(Data) ->
+stream_start_end(Data) when is_list(Data) ->
 	%% find <stream:stream>
 	case re:run(Data, "<stream:stream.+>") of
 		{match, _X} ->
@@ -511,27 +525,27 @@ stream_start_end(Data) when is_binary(Data) ->
 			To = case re:run(Data,
 					"to=[\"']?((?:.(?![\"\']?\\s+(?:\\S+)=|[>\"\']))+.)[\"\']?", [{capture, [1]}]) of
 				{match, [{Start, Length}]} ->
-					binary:part(Data, Start, Length);
+					string:substr(Data, Start + 1, Length);
 				_ ->
 					undefined
 			end,
 			Version = case re:run(Data,
 					"version=[\"']?((?:.(?![\"\']?\\s+(?:\\S+)=|[>\"\']))+.)[\"\']?", [{capture, [1]}]) of
 				{match, [{St, Len}]} ->
-					binary:part(Data, St, Len);
+					string:substr(Data, St + 1, Len);
 				T ->
 					T
 			end,
-			{xmlstreamstart, "stream:stream", [{<<"to">>, To},
-					{<<"version">>, Version},
-					{<<"xmlns">>, ?NS_CLIENT},
-					{<<"xmlns:stream">>, ?NS_STREAM}]};
+			{xmlstreamstart, "stream:stream", [{"to", To},
+					{"version", Version},
+					{"xmlns", ?NS_CLIENT},
+					{"xmlns:stream", ?NS_STREAM}]};
 		nomatch ->
 			?DEBUG("Stream not matched", []),
 			%% find </stream:stream>
 			case re:run(Data, "^</stream:stream>", [global]) of
 				{match, _Loc} ->
-					{xmlstreamend, <<"stream:stream">>};
+					{xmlstreamend, "stream:stream"};
 				nomatch ->
 					false
 			end
@@ -556,7 +570,7 @@ stream_start_end_test() ->
 	{xmlstreamstart, _X, _Y} = stream_start_end("<stream:stream xmlns:stream='http://etherx.jabber.org/streams' xmlns='jabber:client' to='localhost' version='1.0'>"),
 	{xmlstreamend, _Z} = stream_start_end("</stream:stream>").
 streamstart_tobinary_test() ->
-	TestStr =     <<"<stream:stream to='localhost' xmlns:stream='http://etherx.jabber.org/streams' xmlns='jabber:client' version='1.0'>">>,
+	TestStr =     "<stream:stream to='localhost' xmlns:stream='http://etherx.jabber.org/streams' xmlns='jabber:client' version='1.0'>",
 	io:format("~p~n",[streamstart_tobinary({xmlstreamstart, "stream:stream", [{"to","localhost"}, {"xmlns:stream","http://etherx.jabber.org/streams"}, {"xmlns","jabber:client"}, {"version","1.0"}]})]),
 	io:format("~p~n",[TestStr]),
 	TestStr = streamstart_tobinary({xmlstreamstart, "stream:stream", [{"to","localhost"}, {"xmlns:stream","http://etherx.jabber.org/streams"}, {"xmlns","jabber:client"}, {"version","1.0"}]}).

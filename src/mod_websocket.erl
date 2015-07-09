@@ -18,17 +18,16 @@
 ]).
 
 -include("ejabberd.hrl").
--include("logger.hrl").
 -include("jlib.hrl").
 
 
 start(Host, _Opts) ->
-		?WARNING_MSG("~p loaded on ~s", [?MODULE, Host]),
 		case lists:keyfind(ssl, 1, application:which_applications()) of
 			false -> ssl:start();
 			_ -> skip
 		end,
     Proc = gen_mod:get_module_proc(Host, ?PROCNAME_MHB),
+		?WARNING_MSG("~p", [Proc]),
     ChildSpec =
         {Proc,
          {ejabberd_tmp_sup, start_link,
@@ -37,10 +36,11 @@ start(Host, _Opts) ->
          infinity,
          supervisor,
          [ejabberd_tmp_sup]},
-		?DEBUG("WEBSOCKETS SUPERVISOR SPEC: ~p", [ChildSpec]),
-    supervisor:start_child(ejabberd_sup, ChildSpec).
+    supervisor:start_child(ejabberd_sup, ChildSpec),
+		?WARNING_MSG("~p loaded on ~s", [?MODULE, Host]).
 
 stop(Host) ->
     Proc = gen_mod:get_module_proc(Host, ?PROCNAME_MHB),
+		?WARNING_MSG("~p", [Proc]),
     supervisor:terminate_child(ejabberd_sup, Proc),
     supervisor:delete_child(ejabberd_sup, Proc).

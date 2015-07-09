@@ -26,7 +26,6 @@
 	]).
 
 -include("ejabberd.hrl").
--include("logger.hrl").
 -include("jlib.hrl").
 -include("websocket_frame.hrl").
 
@@ -151,7 +150,7 @@ to_binary(#ws_frame{
 
 -spec get_payload(frame()) -> binary().
 get_payload(#ws_frame{payload_data = Data}) ->
-	Data.
+	binary_to_list(Data).
 
 
 %-------------------------------------------------------------------------------

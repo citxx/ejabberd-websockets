@@ -15,7 +15,11 @@ INCLUDE_DIR=${DESTDIR}/usr/lib/ejabberd/include
 .PHONY: compile install get-deps update-deps dialyzer clean
 
 
-default: compile
+default: compile-emakefile
+
+compile-emakefile:
+	mkdir -p ebin
+	erl -make
 
 compile: get-deps src/* rebar.config rebar
 	$(REBAR) compile

@@ -43,7 +43,6 @@
 	]).
 
 -include("ejabberd.hrl").
--include("logger.hrl").
 -include("jlib.hrl").
 -include("websocket_frame.hrl").
 
@@ -59,7 +58,7 @@
 		request_method = undefined :: undefined | atom() | binary(),
 		request_version = undefined :: undefined | {integer(), integer()},
 		request_path = undefined :: undefined | [binary()],
-		request_headers = #{} :: map(),
+		request_headers = orddict:from_list([]) :: orddict:orddict(),
 		parsing_state = websocket_frame:new_parsing_state() ::
 			websocket_frame:parsing_state(),
 		xmpp_ref = undefined,
@@ -272,16 +271,17 @@ ws_handshake_header({recv, http_eoh}, #ws_state{
 		request_path = Path,
 		request_headers = Headers
 	} = State) ->
-	Host = maps:get(<<"host">>, Headers, []),
-	Upgrade = [jlib:tolower(X) || X <- maps:get(<<"upgrade">>, Headers, [])],
-	Connection = [jlib:tolower(X) || X <- maps:get(<<"connection">>, Headers, [])],
-	SecWebSocketKey = maps:get(<<"sec-websocket-key">>, Headers, []),
-	SecWebSocketVersion = maps:get(<<"sec-websocket-version">>, Headers, []),
-	SecWebSocketProtocol = maps:get(<<"sec-websocket-protocol">>, Headers, []),
+	Host = orddict_get("host", Headers, []),
+	Upgrade = [jlib:tolower(X) || X <- orddict_get("upgrade", Headers, [])],
+	Connection = [jlib:tolower(X) || X <- orddict_get("connection", Headers, [])],
+	SecWebSocketKey = orddict_get("sec-websocket-key", Headers, []),
+	SecWebSocketVersion = orddict_get("sec-websocket-version", Headers, []),
+	SecWebSocketProtocol = orddict_get("sec-websocket-protocol", Headers, []),
 	
-	UpgradeContainsWebsocket = lists:member(<<"websocket">>, Upgrade),
-	ConnectionContainsUpgrade = lists:member(<<"upgrade">>, Connection),
-	ProtocolContainsXmpp = lists:member(<<"xmpp">>, SecWebSocketProtocol),
+	UpgradeContainsWebsocket = lists:member("websocket", Upgrade),
+	ConnectionContainsUpgrade = lists:member("upgrade", Connection),
+	ProtocolContainsXmpp = lists:member("xmpp", SecWebSocketProtocol),
+	?DEBUG("Search for ~p in ~p", [Path, RequestHandlers]),
 	MatchedRequestHandler = case Path of 
 		undefined -> undefined;
 		P -> find_request_handler(RequestHandlers, P)
@@ -312,7 +312,7 @@ ws_handshake_header({recv, http_eoh}, #ws_state{
 		length(SecWebSocketVersion) =/= 1 ->
 			{failure, build_http_response(
 					Version, 400, "Bad request: need exactly one 'Sec-WebSocket-Version' header", [])};
-		SecWebSocketVersion =/= [<<"13">>] -> 
+		SecWebSocketVersion =/= ["13"] -> 
 			{failure, build_http_response(
 					Version, 400, "Bad request: unsupported version of WebSocket protocol", [])};
 		MatchedRequestHandler =:= undefined ->
@@ -325,10 +325,10 @@ ws_handshake_header({recv, http_eoh}, #ws_state{
 			ResponseKey = websocket_transform_key(Key),
 			{success, build_http_response(
 					Version, 101, "Switching protocol to XMPP over WebSocket", [
-						{<<"Upgrade">>, <<"websocket">>},
-						{<<"Connection">>, <<"Upgrade">>},
-						{<<"Sec-WebSocket-Accept">>, ResponseKey},
-						{<<"Sec-WebSocket-Protocol">>, <<"xmpp">>}])}
+						{"Upgrade", "websocket"},
+						{"Connection", "Upgrade"},
+						{"Sec-WebSocket-Accept", ResponseKey},
+						{"Sec-WebSocket-Protocol", "xmpp"}])}
 	end,
 	
 	SockMod:send(Socket, Response),
@@ -365,11 +365,8 @@ ws_session({recv, #ws_frame{opcode = ?WS_OPCODE_TEXT} = Frame}, #ws_state{
 	end,
 	IP = case PeerRet of
 		{ok, IPHere} ->
-			XFF = case RequestHeaders of
-				#{<<"x-forwarded-for">> := Value} -> Value;
-				_ -> []
-			end,
-			#{<<"host">> := [Host]} = RequestHeaders,
+			XFF = orddict_get("x-forwarded-for", RequestHeaders, []),
+			[Host] = orddict_get("host", RequestHeaders, undefined),
 			analyze_ip_xff(IPHere, XFF, Host);
 		{error, _Error} ->
 			undefined
@@ -464,44 +461,46 @@ send_frame(SockMod, Socket, Frame) ->
 	end,
 	Result.
 
--spec add_header(atom() | iodata(), iodata(), map()) -> map().
+-spec add_header(atom() | iodata(), iodata(), orddict:orddict()) -> orddict:orddict().
 add_header(Name, Value, HeadersMap) ->
 	BName = jlib:tolower(something_to_binary(Name)),
-	Old = maps:get(BName, HeadersMap, []),
-	New = re:split(Value, ", ", [{return, binary}]) ++ Old,
-	maps:put(BName, New ++ Old, HeadersMap).
+	Old = orddict_get(BName, HeadersMap, []),
+	New = re:split(Value, ", ", [{return, list}]) ++ Old,
+	orddict:store(BName, New ++ Old, HeadersMap).
 
 -spec something_to_binary(atom | iodata()) -> binary().
 something_to_binary(Something) ->
 	case Something of
-		X when is_atom(X) -> atom_to_binary(X, latin1);
-		X when is_binary(X) or is_list(X) -> iolist_to_binary(X)
+		%X when is_atom(X) -> atom_to_binary(X, latin1);
+		X when is_atom(X) -> atom_to_list(X);
+		X when is_binary(X) or is_list(X) -> binary_to_list(iolist_to_binary(X))
+		%X when is_binary(X) or is_list(X) -> iolist_to_binary(X)
 	end.
 
 -spec build_http_response(
-	{integer(), integer()}, integer(), iodata(), [{iodata(), iodata()}]) -> binary().
+	{integer(), integer()}, integer(), iodata(), [{iodata(), iodata()}]) -> string().
 build_http_response({VMaj, VMin}, Code, Message, Headers) ->
 	VMajBin = integer_to_binary(VMaj),
 	VMinBin = integer_to_binary(VMin),
 	CodeBin = integer_to_binary(Code),
-	Response = iolist_to_binary([
+	Response = binary_to_list(iolist_to_binary([
 		"HTTP/", VMajBin, ".", VMinBin, " ", CodeBin, " ", Message, "\r\n",
 		[[Name, ": ", Value, "\r\n"] || {Name, Value} <- Headers],
-		"\r\n"]),
+		"\r\n"])),
 	?DEBUG("Sending response:~n~s", [Response]),
 	Response.
 
--spec to_normalized_path(iodata()) -> [binary()].
+-spec to_normalized_path(iodata()) -> [string()].
 to_normalized_path(PList) when is_list(PList) ->
 	case lists:all(fun is_integer/1, PList) of
 		true ->  % String
 			to_normalized_path(iolist_to_binary(PList));
 		false ->  % General iolist
-			[iolist_to_binary(P) || P <- PList]
+			[binary_to_list(iolist_to_binary(P)) || P <- PList]
 	end;
 to_normalized_path(PBin) when is_binary(PBin) ->
 	RawPath = binary:split(PBin, <<$/>>, [global]),
-	[P || P <- RawPath, byte_size(P) > 0].
+	[binary_to_list(P) || P <- RawPath, byte_size(P) > 0].
 
 -spec find_request_handler([{[binary()], atom()}], [binary()]) -> undefined | {atom(), [binary()]}.
 find_request_handler([], _) ->
@@ -516,15 +515,15 @@ find_request_handler([{HandlerPathPrefix, HandlerModule} | HandlersLeft], Path) 
 			find_request_handler(HandlersLeft, Path)
 	end.
 
--spec websocket_transform_key(binary()) -> binary().
+-spec websocket_transform_key(string()) -> string().
 websocket_transform_key(Key) ->
-	FullKey = <<Key/binary, "258EAFA5-E914-47DA-95CA-C5AB0DC85B11">>,
+	FullKey = Key ++ "258EAFA5-E914-47DA-95CA-C5AB0DC85B11",
 	KeySha = crypto:hash(sha, FullKey),
 	case byte_size(KeySha) of
 		20 -> skip;
 		Length -> ?WARNING_MSG("Invalid length of the key after applying sha-1: ~p", [Length])
 	end,
-	Result = jlib:encode_base64(KeySha),
+	Result = jlib:encode_base64(binary_to_list(KeySha)),
 	Result.
 
 %% Support for X-Forwarded-From
@@ -551,6 +550,13 @@ is_ipchain_trusted(_UserIPs, all) ->
 	true;
 is_ipchain_trusted(UserIPs, TrustedIPs) ->
 	[] == UserIPs -- ["127.0.0.1" | TrustedIPs].
+
+-spec orddict_get(term(), orddict:orddict(), term()) -> term().
+orddict_get(Key, Orddict, Default) ->
+	case orddict:find(Key, Orddict) of
+		{ok, Value} -> Value;
+		error -> Default
+	end.
 
 % Code below is taken (with some modifications) from the yaws webserver, which
 % is distributed under the folowing license:
