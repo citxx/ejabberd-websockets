@@ -480,9 +480,9 @@ something_to_binary(Something) ->
 -spec build_http_response(
 	{integer(), integer()}, integer(), iodata(), [{iodata(), iodata()}]) -> string().
 build_http_response({VMaj, VMin}, Code, Message, Headers) ->
-	VMajBin = integer_to_binary(VMaj),
-	VMinBin = integer_to_binary(VMin),
-	CodeBin = integer_to_binary(Code),
+	VMajBin = list_to_binary(integer_to_list(VMaj)),
+	VMinBin = list_to_binary(integer_to_list(VMin)),
+	CodeBin = list_to_binary(integer_to_list(Code)),
 	Response = binary_to_list(iolist_to_binary([
 		"HTTP/", VMajBin, ".", VMinBin, " ", CodeBin, " ", Message, "\r\n",
 		[[Name, ": ", Value, "\r\n"] || {Name, Value} <- Headers],
