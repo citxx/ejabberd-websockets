@@ -1,0 +1,6 @@
+redhelper-ejabberd-websockets (1.0) unstable; urgency=low
+
+  * Initial release (Closes: #nnnn)  <nnnn is the bug number of your ITP>
+
+ -- Artem Tabolin <artemtab@yandex.ru>  Thu, 10 Jul 2015 12:33:09 +0300
+
