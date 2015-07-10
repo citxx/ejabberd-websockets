@@ -17,11 +17,13 @@ INCLUDE_DIR=${DESTDIR}/usr/lib/ejabberd/include
 
 default: compile-emakefile
 
+compile: compile-emakefile
+
 compile-emakefile:
 	mkdir -p ebin
 	erl -make
 
-compile: get-deps src/* rebar.config rebar
+compile-rebar: get-deps src/* rebar.config rebar
 	$(REBAR) compile
 
 install:
