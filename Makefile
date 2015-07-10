@@ -65,4 +65,4 @@ $(OTP_PLT):
 
 
 clean:
-	$(REBAR) clean
+	#$(REBAR) clean
