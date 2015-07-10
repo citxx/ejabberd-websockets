@@ -1,11 +1,11 @@
-Source: redhelper-ejabberd-websockets
+Source: ejabberd-websockets
 Section: main
 Priority: extra
 Maintainer: Artem Tabolin <artemtab@yandex.ru>
 Build-Depends: debhelper (>= 9)
 Standards-Version: 3.7.2
 
-Package: redhelper-ejabberd-websockets
+Package: ejabberd-websockets
 Architecture: all
 Depends: ${shlibs:Depends}, ${misc:Depends}
 Description: Ejabberd module for websockets support
