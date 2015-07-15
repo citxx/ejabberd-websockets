@@ -79,16 +79,16 @@
 
 start(Host, Sid, Key, IP, WsSessionRef) ->
 	?DEBUG("TRYING TO START ON HOST ~p", [Host]),
-    Proc = gen_mod:get_module_proc(Host, ejabberd_mod_websocket),
-		?ERROR_MSG("supervisor:start_child(~p, ~p)", [Proc, [Sid, Key, IP, WsSessionRef]]),
-    case catch supervisor:start_child(Proc, [Sid, Key, IP, WsSessionRef]) of
-    	{ok, Pid} -> {ok, Pid};
-	Reason ->
-            ?ERROR_MSG("~p~n",[Reason]),
-            {error, "Cannot start XMPP, Websocket session"}
-    end.
+	Proc = gen_mod:get_module_proc(Host, ejabberd_mod_websocket),
+	%?ERROR_MSG("supervisor:start_child(~p, ~p)", [Proc, [Sid, Key, IP, WsSessionRef]]),
+	case catch supervisor:start_child(Proc, [Sid, Key, IP, WsSessionRef]) of
+		{ok, Pid} -> {ok, Pid};
+		Reason ->
+			?ERROR_MSG("~p~n",[Reason]),
+			{error, "Cannot start XMPP, Websocket session"}
+	end.
 start_link(Sid, Key, IP, WsSessionRef) ->
-    gen_fsm:start_link(?MODULE, [Sid, Key, IP, WsSessionRef], []).
+	gen_fsm:start_link(?MODULE, [Sid, Key, IP, WsSessionRef], []).
 
 send({xmpp_websocket, FsmRef, _IP}, Packet) ->
     gen_fsm:sync_send_all_state_event(FsmRef, {send, Packet}).
