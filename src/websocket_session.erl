@@ -518,7 +518,8 @@ find_request_handler([{HandlerPathPrefix, HandlerModule} | HandlersLeft], Path) 
 -spec websocket_transform_key(string()) -> string().
 websocket_transform_key(Key) ->
 	FullKey = Key ++ "258EAFA5-E914-47DA-95CA-C5AB0DC85B11",
-	KeySha = crypto:hash(sha, FullKey),
+	%KeySha = crypto:hash(sha, FullKey),
+	KeySha = crypto:sha(FullKey),
 	case byte_size(KeySha) of
 		20 -> skip;
 		Length -> ?WARNING_MSG("Invalid length of the key after applying sha-1: ~p", [Length])

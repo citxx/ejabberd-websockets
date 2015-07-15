@@ -395,12 +395,14 @@ stream_start(ParsedPayload) ->
 	case ParsedPayload of
 		#xmlelement{name = "stream:stream", attrs = Attrs} ->
 			{"to", Host} = lists:keyfind("to", 1, Attrs),
-			Sid = crypto:hash(sha, term_to_binary({now(), make_ref()})),
+			%Sid = crypto:hash(sha, term_to_binary({now(), make_ref()})),
+			Sid = crypto:sha(term_to_binary({now(), make_ref()})),
 			Key = "",
 			{Host, Sid, Key};
 		{xmlstreamstart, _Name, Attrs} ->
 			{"to", Host} = lists:keyfind("to", 1, Attrs),
-			Sid = crypto:hash(sha, term_to_binary({now(), make_ref()})),
+			%Sid = crypto:hash(sha, term_to_binary({now(), make_ref()})),
+			Sid = crypto:sha(term_to_binary({now(), make_ref()})),
 			Key = "",
 			{Host, Sid, Key};
 		_ ->
