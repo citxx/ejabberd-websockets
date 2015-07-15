@@ -80,6 +80,7 @@
 start(Host, Sid, Key, IP, WsSessionRef) ->
 	?DEBUG("TRYING TO START ON HOST ~p", [Host]),
     Proc = gen_mod:get_module_proc(Host, ejabberd_mod_websocket),
+		?ERROR_MSG("supervisor:start_child(~p, ~p)", [Proc, [Sid, Key, IP, WsSessionRef]]),
     case catch supervisor:start_child(Proc, [Sid, Key, IP, WsSessionRef]) of
     	{ok, Pid} -> {ok, Pid};
 	Reason ->
