@@ -54,6 +54,7 @@
 -record(ws_state, {
 		sockmod :: atom(),
 		socket :: inet:socket(),
+		socket_async_ref :: pid(),
 		request_handlers = [] :: list(request_handler()),
 		request_method = undefined :: undefined | atom() | binary(),
 		request_version = undefined :: undefined | {integer(), integer()},
@@ -144,14 +145,14 @@ terminate(Reason, StateName, _State) ->
 	ok.
 
 handle_info({_Type, _Sock, Data}, StateName, #ws_state{
-		sockmod = SockMod,
-		socket = Socket,
 		parsing_state = ParsingState,
-		receiving_frames = ReceivingFrames
+		receiving_frames = ReceivingFrames,
+		socket_async_ref = SocketAsyncRef
 	} = State) ->
 	?DEBUG("Recieved raw data from WebSocket: ~p", [Data]),
-	SwitchToRaw = case Data of
+	SwitchPacketType = case Data of
 		http_eoh -> [{packet, raw}];
+		{http_request, _, _, _} -> [{packet, httph}];
 		_ -> []
 	end,
 	StateRF = case Data of
@@ -173,7 +174,13 @@ handle_info({_Type, _Sock, Data}, StateName, #ws_state{
 			State#ws_state{parsing_state = NewParsingState}
 	end,
 
-	setopts(SockMod, Socket, [{active, once} | SwitchToRaw]),
+	%setopts(SockMod, Socket, [{active, once} | SwitchPacketType]),
+	case SwitchPacketType of
+		[{packet, Type}] ->
+			socket_async:set_packet_type(SocketAsyncRef, Type);
+		_ -> skip
+	end,
+	socket_async:active_once(SocketAsyncRef),
 	{next_state, StateName, NewState};
 
 % TODO: proper tcp_closed handling
@@ -192,20 +199,27 @@ ws_setup({setup, tcp}, #ws_state{
 		sockmod = SockMod,
 		socket = Socket
 	} = State) ->
-	setopts(SockMod, Socket, [{packet, http}, {active, once}]),
-	{next_state, ws_handshake_request, State};
+	{ok, SocketAsyncRef} = socket_async:start_link(SockMod, Socket),
+	socket_async:set_packet_type(SocketAsyncRef, http),
+	socket_async:active_once(SocketAsyncRef),
+	{next_state, ws_handshake_request, State#ws_state{
+			socket_async_ref = SocketAsyncRef
+		}};
 
 ws_setup({setup, {ssl, Opts}}, #ws_state{
 		sockmod = gen_tcp,
 		socket = Socket
 	} = State) ->
-	case ssl:ssl_accept(Socket, Opts) of
-		{ok, SSLSocket} ->
-			?DEBUG("Upgrade WebSocket connection ~p to ssl", [self()]),
-			setopts(ssl, SSLSocket, [{packet, http}, {active, once}]),
+	case tls:tcp_to_tls(Socket, Opts) of
+		{ok, TLSSocket} ->
+			?DEBUG("Upgrade WebSocket connection ~p to tls", [self()]),
+			{ok, SocketAsyncRef} = socket_async:start_link(tls, TLSSocket),
+			socket_async:set_packet_type(SocketAsyncRef, http),
+			socket_async:active_once(SocketAsyncRef),
 			{next_state, ws_handshake_request, State#ws_state{
-					sockmod = ssl,
-					socket = SSLSocket
+					sockmod = tls,
+					socket = TLSSocket,
+					socket_async_ref = SocketAsyncRef
 				}};
 		{error, closed} ->
 			{stop, normal, State};
@@ -216,7 +230,6 @@ ws_setup({setup, {ssl, Opts}}, #ws_state{
 			gen_tcp:close(Socket),
 			{stop, {error, Error}, State}
 	end.
-
 
 % TODO: add tcp_error handling
 ws_handshake_request(
