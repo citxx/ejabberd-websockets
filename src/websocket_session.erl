@@ -407,7 +407,7 @@ ws_session({recv, #ws_frame{
 		<<Status:16, Message/binary>> -> websocket_frame:make_close(Status, Message)
 	end,
 	send_frame(SockMod, Socket, ClosingFrame),
-	{next_state, closing, State};
+	{next_state, ws_closing, State};
 
 ws_session({recv, #ws_frame{
 		opcode = ?WS_OPCODE_PING,
@@ -449,7 +449,11 @@ ws_closing({recv, #ws_frame{opcode = ?WS_OPCODE_CLOSE}}, #ws_state{
 		socket = Socket
 	} = State) ->
 	SockMod:close(Socket),
-	{stop, normal, State}.
+	{stop, normal, State};
+
+ws_closing({send, _Data}, #ws_state{} = State) ->
+	% Ignore in closing state
+	{next_state, ws_closing, State}.
 
 
 %-------------------------------------------------------------------------------
